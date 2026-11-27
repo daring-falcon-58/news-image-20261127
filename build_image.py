@@ -1,369 +1,528 @@
 #!/usr/bin/env python3
-"""Draw the news-image-20261127 round-4 front page (1024x1024 JPEG).
+"""Draw the round-5 news image for make.fun news-image-20261127.
 
-Fresh build for make.fun competition news-image-20261127 (round 4 resubmit).
-Fixed data, fixed geometry, no randomness, no network, no clock reads:
-running this script twice produces byte-identical output.
+Fresh build, written in this session. Fixed data, fixed geometry, no
+randomness, no network, no clock reads: two runs write byte-identical JPEG.
 
-Design (own, written in this session): deep-navy masthead, giant serif
-dateline, region chips, key-numbers strip, UTC timeline, three big scenes,
-twelve small scenes with drawn glyph discs, 35 listed rows, DATE CHECK box.
-
-Data: 50 stories, every one first reported on Friday 27 November 2026
-(any time zone), verified in-session against live sources. Build as of
-13:30 UTC; the UTC timeline runs 01:00-11:24. Nothing after 13:30 UTC
-is pictured; the image says so on its face.
+Layout (1024x1024, cream broadsheet): masthead -> giant dateline ->
+region chips -> key-numbers strip -> UTC timeline -> 3 big scenes ->
+12 small scenes -> ALSO LISTED (35 rows, 3 columns) -> DATE CHECK +
+AS OF boxes -> footer with sources.
 """
-import hashlib
 import os
-
 from PIL import Image, ImageDraw, ImageFont
 
 W, H = 1024, 1024
-NAVY = (15, 43, 70)
-NAVY_DARK = (10, 30, 50)
-GOLD = (201, 162, 39)
-PAPER = (247, 243, 234)
-INK = (26, 26, 26)
-GREY = (90, 90, 90)
-RED = (166, 28, 28)
-TEAL = (14, 110, 110)
-GREEN = (28, 120, 60)
-BURG = (122, 28, 48)
-LINE = (200, 192, 175)
-WHITE = (255, 255, 255)
+OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "entry.png")
 
-SERIF = "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf"
-SERIF_B = "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf"
+# --- palette: warm broadsheet paper, ink, red accent ----------------------
+PAPER = (247, 242, 231)
+INK = (26, 26, 24)
+RED = (178, 34, 34)
+NAVY = (31, 58, 95)
+GREY = (110, 105, 94)
+LIGHT = (233, 226, 210)
+GOLD = (176, 132, 30)
+GREEN = (31, 110, 62)
+
+SERIF = "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf"
+SERIF_R = "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf"
 SANS = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 SANS_B = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 
 
-def F(path, size):
+def font(path, size):
     return ImageFont.truetype(path, size)
 
 
-def tw(d, s, f):
-    return d.textlength(s, font=f)
-
-
-def wrap(d, s, f, max_w):
-    """Greedy wrap; raises if a single word is wider than max_w."""
-    words = s.split()
+def wrap(draw, text, fnt, max_w):
+    """Greedy wrap; returns list of lines, each <= max_w px."""
+    words = text.split()
     lines, cur = [], ""
     for w in words:
         trial = (cur + " " + w).strip()
-        if tw(d, trial, f) <= max_w:
+        if draw.textlength(trial, font=fnt) <= max_w:
             cur = trial
         else:
             if cur:
                 lines.append(cur)
-            if tw(d, w, f) > max_w:
-                raise SystemExit(f"WORD TOO WIDE: {w!r} for {max_w}px")
             cur = w
     if cur:
         lines.append(cur)
     return lines
 
 
-def fit(d, s, f, max_w, max_lines, tag):
-    lines = wrap(d, s, f, max_w)
+def fit(draw, text, fnt, max_w, max_lines):
+    """Wrap text; raise if it does not fit in max_lines lines."""
+    lines = wrap(draw, text, fnt, max_w)
     if len(lines) > max_lines:
-        raise SystemExit(f"TEXT OVERFLOW {tag}: {len(lines)}>{max_lines}: {s!r}")
+        raise ValueError("text does not fit (%d lines): %r" % (len(lines), text))
     return lines
 
 
-def centre(d, cx, y, s, f, fill):
-    d.text((cx - tw(d, s, f) / 2, y), s, font=f, fill=fill)
-
-
-def panel(d, box, fill, outline=None, width=1):
-    d.rectangle(box, fill=fill, outline=outline, width=width)
-
-
-# ------------------------------------------------------------------ data
-# Big scenes: (key, headline, body, region, field, source)
-BIG = [
-    ("P1", "EU SUMMIT ENDS WITH NO DEAL",
-     "The \u20ac1.58tn budget and \u20ac45bn Ukraine loan stall; "
-     "24 of 27 back the loan; talks resume Dec 17\u201318.",
-     "Europe", "Politics", "Consilium / Reuters"),
-    ("P5", "GAZA: 11 KILLED IN 24 HOURS",
-     "Children hurt in Rimal and Jabalia; toll since the ceasefire 1,705; "
-     "total since Oct 2023: 74,772.",
-     "Middle East", "Conflict", "WAFA / QNA / Al Jazeera"),
-    ("P9", "NEW ZEALAND HUNG: 65\u201365",
-     "Final count leaves the coalition one seat short; "
-     "the Opportunity Party is kingmaker.",
-     "Oceania", "Elections", "NZ Herald / Reuters"),
+# --- the 50 stories: all first reported Friday 27 November 2026 ----------
+# PICTURED: (glyph, title, fact, region, field)
+PICTURED_BIG = [
+    ("stars", "EU SUMMIT ENDS: NO DEAL",
+     "No deal on \u20ac1.58tn budget or \u20ac45bn loan; 24 of 27 back it. "
+     "Talks resume Dec 17\u201318.",
+     "Europe", "Politics"),
+    ("skyline", "GAZA: 19 KILLED IN 48 HOURS",
+     "19 killed in 48 hours despite the ceasefire; toll since ceasefire "
+     "1,705; total 74,772.",
+     "Middle East", "Conflict"),
+    ("chart", "WALL ST RALLIES",
+     "Short session: Nasdaq +1.0%, S&P +0.8%, Dow +0.8%; tech rebounds.",
+     "N. America", "Markets"),
 ]
 
-# Small scenes: (headline, subline, glyph, colour, region, field)
-SMALL = [
-    ("de Cos picked to lead ECB", "Succeeds Lagarde in Feb 2027", "\u20ac", NAVY, "Europe", "Politics"),
-    ("Asia steady in morning trade", "Kospi +2%, Nikkei +0.7%", "\u25b2", GREEN, "East Asia", "Markets"),
-    ("Drone violates Latvia airspace", "Unidentified drone, Friday", "\u25c6", RED, "Europe", "Conflict"),
-    ("155 drones in one night", "110 downed; 1 killed, 9 hurt", "\u25c6", NAVY_DARK, "Europe", "Conflict"),
-    ("Zelensky: US \u2018too focused\u2019", "BBC interview, Friday", "\u25cf", TEAL, "Europe", "Diplomacy"),
-    ("Black Friday: $12.9bn online", "Adobe forecast; 126m shoppers", "$", BURG, "N. America", "Retail"),
-    ("China factory profits +20.1%", "October, year on year (NBS)", "\u25b2", GREEN, "East Asia", "Economy"),
-    ("Brent $97.19 a barrel", "Up ~0.7% as tensions lift oil", "\u25cf", NAVY, "Europe", "Energy"),
-    ("Tokyo CPI hits 2.9%", "16-month high; BOJ hike looms", "\u00a5", RED, "East Asia", "Economy"),
-    ("India\u2013US deal \u2018nearing completion\u2019", "Trade minister Goyal", "\u2605", TEAL, "South Asia", "Trade"),
-    ("Seoul sends 6 North Koreans home", "Repatriated by sea", "\u25c6", NAVY_DARK, "East Asia", "Diplomacy"),
-    ("China stocks: best day in 2 years", "Shanghai +4.2%, STAR 50 +15%", "\u25b2", GREEN, "East Asia", "Markets"),
+PICTURED_SMALL = [
+    ("euro", "ECB: DE COS TO LEAD",
+     "Spain's de Cos recommended as next ECB president.",
+     "Europe", "Politics"),
+    ("bars", "ASIA SURGES: KOSPI +4.3%",
+     "Nikkei +2.1%, Shanghai +3.7%, Hang Seng +2.1%.",
+     "East Asia", "Markets"),
+    ("drone", "DRONE OVER LATVIA",
+     "Unidentified drone briefly enters Latvian airspace.",
+     "Europe", "Conflict"),
+    ("burst", "RUSSIA FIRES 155 DRONES",
+     "110 downed overnight; 1 killed, 9 hurt; Vinnytsia energy hit.",
+     "Europe", "Conflict"),
+    ("mic", "ZELENSKY TO THE BBC",
+     "US 'too focused on Middle East'; Patriot delays cost lives.",
+     "Europe", "Conflict"),
+    ("bag", "BLACK FRIDAY: $12.9BN ONLINE",
+     "Adobe expects $12.9bn online in a day; NRF: 126m shoppers.",
+     "N. America", "Retail"),
+    ("beehive", "NZ: COALITION 65\u201365",
+     "Final count: coalition one short; Opportunity kingmaker.",
+     "Oceania", "Elections"),
+    ("factory", "CHINA PROFITS +20.1%",
+     "Industrial profits up 20.1% y/y in Oct, fastest in 5 months.",
+     "East Asia", "Economy"),
+    ("robot", "TESLA FILES TO BUY EMAG",
+     "Files with Germany's cartel office to buy EMAG.",
+     "Europe", "Tech"),
+    ("yen", "TOKYO CPI 2.9%: 16-MO HIGH",
+     "Core CPI at a 16-month high; BOJ hike case grows.",
+     "East Asia", "Economy"),
+    ("flags", "INDIA\u2013US DEAL NEAR",
+     "Trade deal nearing completion, says minister Piyush Goyal.",
+     "South Asia", "Diplomacy"),
+    ("boat", "KOREA SENDS 6 HOME",
+     "South Korea repatriates 6 North Koreans by sea; a 7th stays.",
+     "East Asia", "Diplomacy"),
 ]
 
-# Listed rows: (key, headline, region, field)
+# LISTED: (headline, region, field)
 LISTED = [
-    ("L1", "Erdogan ratifies Mecca defence pact for Turkey", "Middle East", "Diplomacy"),
-    ("L2", "Eurozone sentiment 95.8, lowest since June", "Europe", "Economy"),
-    ("L3", "Dollar heads for 3rd monthly gain, DXY 103.8", "N. America", "Markets"),
-    ("L4", "US futures at midday: S&P +1.74%, Nasdaq +2.34%", "N. America", "Markets"),
-    ("L5", "Gold $3,708 (+4%), silver $44.04 (+10%)", "N. America", "Markets"),
-    ("L6", "Brands shift $254m of orders out of Bangladesh", "South Asia", "Trade"),
-    ("L7", "Bitcoin ~$61,600 as $7bn options expire", "N. America", "Crypto"),
-    ("L8", "Amazon strikes in 20+ countries on Black Friday", "Global", "Labour"),
-    ("L9", "2028 Thomas & Uber Cup goes to New Delhi", "South Asia", "Sport"),
-    ("L10", "Bears 39\u201335 Lions, TD with 3 seconds left", "N. America", "Sport"),
-    ("L11", "Marseille fan violence condemned; 11 injured", "Europe", "Conflict"),
-    ("L12", "Macron: \u20ac204bn cuts a \u2018strategic mistake\u2019", "Europe", "Politics"),
-    ("L13", "Hunger to worsen in 16 hotspots, UN warns", "Global", "Health"),
-    ("L14", "China cabinet vows steps to steady markets", "East Asia", "Economy"),
-    ("L15", "France CPI 3.2%; Spain 4.1%; France GDP \u22120.2%", "Europe", "Economy"),
-    ("L16", "Europe midday: Stoxx +0.98% at 643.25", "Europe", "Markets"),
-    ("L17", "Half of shelters for displaced women shut", "Global", "Humanitarian"),
-    ("L18", "Russia hits 2 grain ships near Odesa", "Europe", "Conflict"),
-    ("L19", "Rand +~1% to 17.37; platinum +5%", "S. Africa", "Markets"),
-    ("L20", "Quake M5.3 off Bonin Islands; no tsunami", "East Asia", "Disaster"),
-    ("L21", "Sensex closes \u2212989; rupee 92.98 per dollar", "South Asia", "Markets"),
-    ("L22", "India frees 164 in Delhi cyber-fraud racket", "South Asia", "Crime"),
-    ("L23", "Spain\u2019s Vox nears power as election kingmaker", "Europe", "Elections"),
-    ("L24", "Strobe Talbott, ex-deputy secretary, dies at 80", "N. America", "Obituary"),
-    ("L25", "Ex-Guangxi chief gets death sentence, reprieved", "East Asia", "Law"),
-    ("L26", "CPTPP to open talks: UAE, Indonesia, Philippines", "East Asia", "Trade"),
-    ("L27", "China drills Taiwan landing on floating bridge", "East Asia", "Conflict"),
-    ("L28", "NZ 246/5 on day 1 vs India; Brar debuts", "Oceania", "Sport"),
-    ("L29", "Gukesh draws game 3; title match 1.5\u20131.5", "Europe", "Sport"),
-    ("L30", "Egypt mosques pray for Ring Road fire victims", "N. Africa", "Religion"),
-    ("L31", "Russia lost 55,629 troops in November, a record", "Europe", "Conflict"),
-    ("L32", "Nigeria\u2019s envoy presents credentials in Mexico", "Latin America", "Diplomacy"),
-    ("L33", "Indonesia arrests 3 over share manipulation", "SE Asia", "Law"),
-    ("L34", "~100 Labour MPs oppose Rosebank oilfield", "Europe", "Politics"),
-    ("L35", "Australia sanctions 2 over antisemitic attacks", "Oceania", "Law"),
+    ("Erdogan completes Turkey's ratification of the Mecca defence pact",
+     "Middle East", "Diplomacy"),
+    ("Eurozone sentiment ESI falls 0.7 to 95.8 in Nov, lowest since June",
+     "Europe", "Economy"),
+    ("Brent ~$97.27, near $98, on Hormuz supply fears; WTI $85.80",
+     "Middle East", "Energy"),
+    ("Gold ~$3,660 (+3.6%), silver $43.68 (+9%); copper surges most since Jan",
+     "N. America", "Markets"),
+    ("Bitcoin ~$61,600 as ~$7bn of options expire today",
+     "N. America", "Crypto"),
+    ("Amazon workers strike in 20+ countries on Black Friday",
+     "Global", "Labour"),
+    ("BWF awards 2028 Thomas & Uber Cup Finals to New Delhi",
+     "South Asia", "Sport"),
+    ("Bears 39\u201335 Lions: Williams TD with 3 seconds left",
+     "N. America", "Sport"),
+    ("Macron: \u20ac204bn budget cuts a 'strategic mistake'",
+     "Europe", "Politics"),
+    ("Hunger to worsen in 16 hotspots; famine threatens parts of Africa \u2014 FAO/WFP",
+     "Global", "Humanitarian"),
+    ("France CPI 3.2%; Spain 4.1%; France GDP \u22120.2%",
+     "Europe", "Economy"),
+    ("Europe at midday: Stoxx ~643.5 (+1.0%); tech +2.6%, miners +4%",
+     "Europe", "Markets"),
+    ("Nearly half of shelters for displaced women closed on funding cuts \u2014 UNHCR",
+     "Global", "Humanitarian"),
+    ("Russia hits 2 grain ships near Odesa; 100,000+ t",
+     "Europe", "Conflict"),
+    ("Quake M5.3 off Japan's Bonin Islands; no tsunami",
+     "East Asia", "Disaster"),
+    ("Sensex closes \u2212989 (\u22121.17%) at 83,339; rupee 92.98 per dollar",
+     "South Asia", "Markets"),
+    ("Spain's Vox nears power as election kingmaker (~17\u201318% in polls)",
+     "Europe", "Politics"),
+    ("Strobe Talbott, ex-deputy secretary of state, dies at 80",
+     "N. America", "Obituary"),
+    ("CPTPP to open talks with UAE, Indonesia, Philippines",
+     "SE Asia", "Trade"),
+    ("China stages Taiwan landing drill on a floating bridge",
+     "East Asia", "Conflict"),
+    ("NZ 246/5 on day 1 of 2nd Test vs India (Latham 59, Blundell 53*)",
+     "Oceania", "Sport"),
+    ("Gukesh draws game 3 vs Sindarov (60 moves); match 1.5\u20131.5",
+     "Europe", "Sport"),
+    ("Egypt mosques pray Friday for Ring Road fire victims",
+     "N. Africa", "Religion"),
+    ("Nigeria's envoy presents credentials in Mexico",
+     "West Africa", "Diplomacy"),
+    ("Indonesia arrests 3 over share manipulation",
+     "SE Asia", "Crime"),
+    ("~100 Labour MPs sign letter opposing the Rosebank oilfield",
+     "Europe", "Law"),
+    ("Australia sanctions 2 over antisemitic attacks",
+     "Oceania", "Law"),
+    ("Abu Dhabi talks end with no breakthrough; Medinsky holds hard line",
+     "Middle East", "Diplomacy"),
+    ("Trump backs Iraq PM's drive for state control over militias",
+     "Middle East", "Politics"),
+    ("Puerto Rico unions strike on Black Friday over pay and pensions",
+     "Latin America", "Labour"),
+    ("Venezuela backs up to $12.5bn credit to clear arrears",
+     "Latin America", "Economy"),
+    ("Guatemala president to veto the 2027 budget",
+     "Latin America", "Politics"),
+    ("Tshwane re-elects ActionSA mayor Moya, 115 votes to 87",
+     "S. Africa", "Politics"),
+    ("Kenya jails ex-governor Obado for 25 years",
+     "East Africa", "Law"),
+    ("EU envoy in Delhi calls US tariff case 'not very convincing'",
+     "South Asia", "Trade"),
 ]
 
-# Timeline: (UTC minutes, time label, caption lines)
+# UTC timeline (first-report times, all Friday 27 Nov 2026 UTC)
 TIMELINE = [
-    (60, "01:00", "NZ final count:\ncoalition 65\u201365"),
-    (153, "02:33", "Asia wrap:\nKospi +2%"),
-    (372, "06:12", "Talbott obituary\npublished"),
-    (480, "08:00", "155 drones fired\nat Ukraine"),
-    (573, "09:33", "India frees 164\nin fraud racket"),
-    (600, "10:00", "Sensex closes\n\u2212989"),
-    (679, "11:19", "Europe midday:\nStoxx +0.98%"),
-    (684, "11:24", "US futures:\nNasdaq +2.34%"),
-]
-KEYNUMS = [
-    ("\u20ac45bn", "EU loan: NO DEAL"),
-    ("74,772", "Gaza toll since Oct 2023"),
-    ("65\u201365", "NZ hung parliament"),
-    ("+4.2%", "Shanghai, best day in 2 yrs"),
-    ("$3,708", "Gold +4% \u00b7 silver +10%"),
-    ("92.98", "Rupee/$ \u00b7 Sensex \u2212989"),
+    ("00:30", "Costa: EU summit ends, NO DEAL"),
+    ("02:33", "Asia opens: Kospi +2%, Nikkei +0.7%"),
+    ("04:44", "S. Korea repatriates 6 North Koreans"),
+    ("06:12", "Talbott obituary published (01:12 EST)"),
+    ("08:00", "Ukraine: 155 drones, 110 downed"),
+    ("09:25", "CPTPP to open talks (Hanoi)"),
+    ("13:21", "Tesla files to buy EMAG (Reuters)"),
+    ("15:29", "Wall St midday: Dow 50,550, S&P 7,243"),
 ]
 
-REGIONS = [
-    ("EUROPE", 16), ("MIDEAST", 2), ("E. ASIA", 10), ("S. ASIA", 5),
-    ("SE ASIA", 1), ("OCEANIA", 3), ("N. AMER.", 7), ("N. AFR.", 1),
-    ("S. AFR.", 1), ("LATAM", 1), ("GLOBAL", 3),
+KEY_NUMBERS = [
+    ("\u20ac1.58tn", "EU BUDGET: NO DEAL"),
+    ("74,772", "GAZA DEATH TOLL"),
+    ("+4.3%", "KOSPI CLOSE"),
+    ("$3,660", "GOLD (+3.6%)"),
+    ("65\u201365", "NZ COALITION"),
+    ("$97.27", "BRENT CRUDE"),
 ]
 
+AS_OF = "16:30 UTC"
 
-def check_counts():
-    assert len(BIG) + len(SMALL) + len(LISTED) == 50
-    regs, fields = {}, {}
-    for _, _, _, rg, fd, *_ in [(b[0], b[1], b[2], b[3], b[4]) for b in BIG]:
-        regs[rg] = regs.get(rg, 0) + 1
-        fields[fd] = fields.get(fd, 0) + 1
-    for _, _, _, _, rg, fd in SMALL:
-        regs[rg] = regs.get(rg, 0) + 1
-        fields[fd] = fields.get(fd, 0) + 1
-    for _, _, rg, fd in LISTED:
-        regs[rg] = regs.get(rg, 0) + 1
-        fields[fd] = fields.get(fd, 0) + 1
-    expect_regs = {"Europe": 16, "Middle East": 2, "East Asia": 10,
-                   "South Asia": 5, "SE Asia": 1, "Oceania": 3,
-                   "N. America": 7, "N. Africa": 1, "S. Africa": 1,
-                   "Latin America": 1, "Global": 3}
-    assert regs == expect_regs, f"region mismatch {regs}"
-    assert sum(fields.values()) == 50, fields
-    assert len(fields) == 19, f"field count {len(fields)}: {fields}"
-    assert sum(n for _, n in REGIONS) == 50
-    return fields
+# Thursday (and earlier) items checked and EXCLUDED from this image:
+EXCLUDED = (
+    "Altria/Imperial bid (Thu) \u00b7 Binance recovery (Thu) \u00b7 "
+    "US chip curbs / Z.AI (Thu) \u00b7 Section 301 tariffs (Wed\u2013Thu) \u00b7 "
+    "UK migration 77,000 (Thu) \u00b7 Kuwait drone strike (Thu) \u00b7 Jazan refinery (Thu) \u00b7 "
+    "FIFA cyberattack (Thu) \u00b7 Thanksgiving storm (Thu) \u00b7 F1 Abu Dhabi GP (Dec 3\u20136)"
+)
 
+SOURCES = (
+    "Sources: Reuters, AP, BBC, Al Jazeera, Consilium, NBS, NZ Herald, "
+    "European Commission, Ukrainian Air Force, UNI Global Union, FAO/WFP, UNHCR, "
+    "BSE/NSE, Cricinfo, Rio Times, Nexuseuropa digest. All 50 stories first reported "
+    "Friday 27 November 2026 (any time zone)."
+)
 
-def draw_big_scene(d, box, key, headline, body, accent):
-    x0, y0, x1, y1 = box
-    panel(d, box, WHITE, outline=LINE)
-    d.rectangle([x0, y0, x1, y0 + 5], fill=accent)
-    # pictogram: big glyph disc on the left (P5 gets a drawn crescent)
-    cx, cy, r = x0 + 52, y0 + 68, 34
-    d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=accent)
-    if key == "P5":
-        d.ellipse([cx - 14, cy - 16, cx + 14, cy + 16], fill=GOLD)
-        d.ellipse([cx - 6, cy - 16, cx + 22, cy + 16], fill=accent)
+# --- glyphs: one distinct pictogram per small scene ------------------------
+def glyph(draw, kind, cx, cy, r, ink, accent):
+    """Draw a small pictogram centred at (cx, cy) inside radius r."""
+    if kind == "stars":  # EU: circle of 12 stars + red X
+        import math
+        for i in range(12):
+            a = 2 * math.pi * i / 12 - math.pi / 2
+            draw.ellipse([cx + int(0.62 * r * math.cos(a)) - 2,
+                          cy + int(0.62 * r * math.sin(a)) - 2,
+                          cx + int(0.62 * r * math.cos(a)) + 2,
+                          cy + int(0.62 * r * math.sin(a)) + 2], fill=GOLD)
+        draw.line([cx - 8, cy - 8, cx + 8, cy + 8], fill=accent, width=4)
+        draw.line([cx - 8, cy + 8, cx + 8, cy - 8], fill=accent, width=4)
+    elif kind == "skyline":  # Gaza: skyline + minaret
+        draw.rectangle([cx - r, cy + 2, cx - r + 9, cy + r - 4], fill=ink)
+        draw.rectangle([cx - r + 11, cy - 4, cx - r + 20, cy + r - 4], fill=ink)
+        draw.rectangle([cx + 2, cy - 10, cx + 6, cy + r - 4], fill=ink)
+        draw.polygon([(cx + 1, cy - 10), (cx + 7, cy - 10), (cx + 4, cy - r + 2)],
+                     fill=accent)
+        draw.rectangle([cx + 9, cy + 6, cx + r, cy + r - 4], fill=ink)
+    elif kind == "chart":  # Wall St: rising bars + arrow
+        draw.rectangle([cx - r, cy + 6, cx - r + 7, cy + r - 4], fill=ink)
+        draw.rectangle([cx - r + 10, cy - 2, cx - r + 17, cy + r - 4], fill=ink)
+        draw.rectangle([cx - r + 20, cy - 10, cx - r + 27, cy + r - 4], fill=GREEN)
+        draw.line([cx - r, cy - 12, cx + r, cy - r + 2], fill=accent, width=3)
+        draw.polygon([(cx + r - 6, cy - r + 2), (cx + r + 2, cy - r + 2),
+                      (cx + r - 2, cy - r - 4)], fill=accent)
+    elif kind == "euro":
+        f = font(SANS_B, int(r * 1.5))
+        draw.text((cx, cy), "\u20ac", font=f, fill=ink, anchor="mm")
+    elif kind == "bars":
+        hs = [0.4, 0.7, 0.55, 1.0, 0.85]
+        bw = int(2 * r / 5)
+        for i, h in enumerate(hs):
+            x0 = cx - r + i * bw
+            draw.rectangle([x0, cy + r - int(2 * r * h), x0 + bw - 2, cy + r],
+                           fill=GREEN if h == 1.0 else ink)
+    elif kind == "drone":
+        draw.ellipse([cx - 5, cy - 4, cx + 5, cy + 4], fill=ink)
+        draw.line([cx - r, cy - r + 4, cx - 4, cy - 2], fill=ink, width=2)
+        draw.line([cx + 4, cy - 2, cx + r, cy - r + 4], fill=ink, width=2)
+        draw.line([cx - r, cy + r - 6, cx - 4, cy + 2], fill=ink, width=2)
+        draw.line([cx + 4, cy + 2, cx + r, cy + r - 6], fill=ink, width=2)
+        for px, py in [(-r, -r + 4), (r, -r + 4), (-r, r - 6), (r, r - 6)]:
+            draw.ellipse([cx + px - 3, cy + py - 2, cx + px + 3, cy + py + 2],
+                         outline=ink, width=2)
+    elif kind == "burst":
+        import math
+        pts = []
+        for i in range(16):
+            ang = 2 * math.pi * i / 16
+            rad = r if i % 2 == 0 else r * 0.45
+            pts.append((cx + rad * math.cos(ang), cy + rad * math.sin(ang)))
+        draw.polygon(pts, fill=accent)
+        draw.ellipse([cx - 5, cy - 5, cx + 5, cy + 5], fill=PAPER)
+    elif kind == "mic":
+        draw.rounded_rectangle([cx - 6, cy - r, cx + 6, cy + 2], radius=5,
+                               fill=ink)
+        draw.arc([cx - 10, cy - 4, cx + 10, cy + 12], 0, 180, fill=ink, width=2)
+        draw.line([cx, cy + 12, cx, cy + r - 2], fill=ink, width=2)
+    elif kind == "bag":
+        draw.rectangle([cx - 9, cy - 6, cx + 9, cy + r - 2], fill=accent)
+        draw.arc([cx - 6, cy - r + 2, cx + 6, cy - 2], 0, 180, fill=ink, width=2)
+    elif kind == "beehive":
+        draw.polygon([(cx, cy - r), (cx - r + 2, cy + 2), (cx + r - 2, cy + 2)],
+                     fill=GOLD)
+        draw.rectangle([cx - r + 2, cy + 2, cx + r - 2, cy + r - 2], fill=ink)
+        draw.line([cx - r + 2, cy + 6, cx + r - 2, cy + 6], fill=PAPER, width=1)
+    elif kind == "factory":
+        draw.rectangle([cx - r, cy, cx + r, cy + r - 2], fill=ink)
+        draw.rectangle([cx - r + 2, cy - 6, cx - r + 6, cy], fill=ink)
+        draw.polygon([(cx + 2, cy), (cx + r - 4, cy), (cx + r - 4, cy - r + 4),
+                      (cx + r - 8, cy - r + 4)], fill=accent)
+    elif kind == "robot":
+        draw.rectangle([cx - 8, cy - r + 2, cx + 8, cy - 2], fill=ink)
+        draw.line([cx, cy - r + 2, cx, cy - r - 2], fill=ink, width=2)
+        draw.ellipse([cx - 2, cy - r - 4, cx + 2, cy - r], fill=accent)
+        draw.ellipse([cx - 5, cy - r + 7, cx - 1, cy - r + 11], fill=PAPER)
+        draw.ellipse([cx + 1, cy - r + 7, cx + 5, cy - r + 11], fill=PAPER)
+        draw.rectangle([cx - 10, cy + 2, cx + 10, cy + r - 2], fill=ink)
+    elif kind == "yen":
+        f = font(SANS_B, int(r * 1.5))
+        draw.text((cx, cy), "\u00a5", font=f, fill=ink, anchor="mm")
+    elif kind == "flags":
+        draw.line([cx - 8, cy - r, cx - 8, cy + r - 2], fill=ink, width=2)
+        draw.polygon([(cx - 8, cy - r), (cx + 2, cy - r + 6), (cx - 8, cy - r + 12)],
+                     fill=accent)
+        draw.line([cx + 8, cy - r, cx + 8, cy + r - 2], fill=ink, width=2)
+        draw.polygon([(cx + 8, cy - r), (cx + r, cy - r + 6), (cx + 8, cy - r + 12)],
+                     fill=NAVY)
+    elif kind == "boat":
+        draw.polygon([(cx - r, cy + 2), (cx + r, cy + 2), (cx + r - 5, cy + r - 2),
+                      (cx - r + 5, cy + r - 2)], fill=NAVY)
+        draw.line([cx, cy + 2, cx, cy - r + 2], fill=ink, width=2)
+        draw.polygon([(cx, cy - r + 2), (cx + r - 4, cy - 2), (cx, cy - 2)],
+                     fill=accent)
     else:
-        glyph = {"P1": "\u20ac", "P9": "65"}[key]
-        gf = F(SANS_B, 26 if key != "P9" else 20)
-        gw = tw(d, glyph, gf)
-        d.text((cx - gw / 2, cy - 15 if key != "P9" else cy - 12), glyph, font=gf, fill=WHITE)
-    tx = x0 + 96
-    twd = x1 - tx - 10
-    hl = fit(d, headline, F(SERIF_B, 17), twd, 2, key + "-headline")
-    y = y0 + 12
-    for ln in hl:
-        d.text((tx, y), ln, font=F(SERIF_B, 17), fill=INK)
-        y += 21
-    bl = fit(d, body, F(SANS, 12), twd, 3, key + "-body")
-    for ln in bl:
-        d.text((tx, y), ln, font=F(SANS, 12), fill=(60, 60, 60))
-        y += 15
-    assert y <= y1 - 6, f"big scene {key} overflows"
+        draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=ink, width=2)
 
 
-def main():
-    fields = check_counts()
+def big_scene(draw, x, y, w, h, item):
+    kind, title, fact, region, field = item
+    draw.rounded_rectangle([x, y, x + w, y + h], radius=6, outline=INK, width=2,
+                           fill=(255, 255, 255))
+    # art band
+    draw.rectangle([x + 2, y + 2, x + w - 2, y + 78], fill=LIGHT)
+    glyph(draw, kind, x + w // 2, y + 40, 26, INK, RED)
+    # region/field tag
+    tag = "%s \u00b7 %s" % (region.upper(), field.upper())
+    f_tag = font(SANS_B, 10)
+    draw.text((x + 10, y + 82), tag, font=f_tag, fill=RED)
+    f_t = font(SANS_B, 15)
+    lines = fit(draw, title, f_t, w - 20, 1)
+    draw.text((x + 10, y + 98), lines[0], font=f_t, fill=INK)
+    f_f = font(SANS, 11)
+    flines = fit(draw, fact, f_f, w - 20, 2)
+    ty = y + 118
+    for ln in flines:
+        draw.text((x + 10, ty), ln, font=f_f, fill=INK)
+        ty += 13
+
+
+def small_scene(draw, x, y, w, h, item):
+    kind, title, fact, region, field = item
+    draw.rounded_rectangle([x, y, x + w, y + h], radius=5, outline=GREY, width=1,
+                           fill=(255, 255, 255))
+    draw.ellipse([x + 6, y + 8, x + 50, y + 52], fill=LIGHT, outline=INK, width=1)
+    glyph(draw, kind, x + 28, y + 30, 13, INK, RED)
+    f_t = font(SANS_B, 11)
+    lines = fit(draw, title, f_t, w - 60, 2)
+    ty = y + 6
+    for ln in lines:
+        draw.text((x + 56, ty), ln, font=f_t, fill=INK)
+        ty += 13
+    f_f = font(SANS, 10)
+    flines = fit(draw, fact, f_f, w - 60, 2)
+    for ln in flines:
+        draw.text((x + 56, ty), ln, font=f_f, fill=INK)
+        ty += 12
+
+
+def build():
+    # --- data assertions ---------------------------------------------------
+    assert len(PICTURED_BIG) == 3 and len(PICTURED_SMALL) == 12
+    assert len(LISTED) == 35
+    assert len(TIMELINE) == 8
+    all_rows = [(r[3], r[4]) for r in PICTURED_BIG + PICTURED_SMALL] + \
+               [(r[1], r[2]) for r in LISTED]
+    assert len(all_rows) == 50
+    from collections import Counter
+    regions = Counter(r[0] for r in all_rows)
+    fields = Counter(r[1] for r in all_rows)
+    assert sum(regions.values()) == 50 and sum(fields.values()) == 50
+    assert len(regions) == 13, regions
+    assert len(fields) == 19, fields
+
     img = Image.new("RGB", (W, H), PAPER)
     d = ImageDraw.Draw(img)
-    mx = 16
-    cw = W - 2 * mx  # 992
+    MX = 24  # margin
 
-    # ---- masthead 0..56
-    d.rectangle([0, 0, W, 56], fill=NAVY)
-    d.text((mx, 12), "THE WORLD IN ONE DAY", font=F(SERIF_B, 30), fill=WHITE)
-    right = "FRIDAY EDITION  \u00b7  $100 IN PRIZES"
-    d.text((W - mx - tw(d, right, F(SANS_B, 12)), 20), right, font=F(SANS_B, 12), fill=GOLD)
-
-    # ---- dateline 56..104
-    centre(d, W // 2, 62, "FRIDAY 27 NOVEMBER 2026", F(SERIF_B, 38), INK)
-    d.line([(W // 2 - 110, 104), (W // 2 + 110, 104)], fill=GOLD, width=3)
-
-    # ---- subline 104..126
-    centre(d, W // 2, 110,
-           "50 stories \u2014 every one first reported on Friday 27 November 2026 \u00b7 as of 13:30 UTC",
-           F(SANS, 15), GREY)
-
-    # ---- region chips 126..152
-    chip_f = F(SANS_B, 12)
-    labels = [f"{name} {n}" for name, n in REGIONS]
-    widths = [tw(d, t, chip_f) + 16 for t in labels]
-    total = sum(widths) + 6 * (len(labels) - 1)
-    assert total <= cw, f"chips too wide: {total}"
-    x = mx + (cw - total) // 2
-    for label, w in zip(labels, widths):
-        d.rounded_rectangle([x, 128, x + w, 150], radius=11, fill=WHITE,
-                            outline=NAVY, width=1)
-        d.text((x + 8, 132), label, font=chip_f, fill=NAVY)
-        x += w + 6
-
-    # ---- key numbers 152..194
-    bw = (cw - 5 * 8) // 6
-    for i, (num, lab) in enumerate(KEYNUMS):
-        x0 = mx + i * (bw + 8)
-        panel(d, [x0, 156, x0 + bw, 192], WHITE, outline=LINE)
-        centre(d, x0 + bw // 2, 159, num, F(SERIF_B, 19), RED if i in (0, 1) else NAVY)
-        centre(d, x0 + bw // 2, 180, lab, F(SANS, 10), GREY)
-
-    # ---- timeline 194..254: label + line + 8 events (evenly spaced by
-    # index, not to scale — times are labelled on each event)
-    lx0, lx1 = mx + 184, W - mx - 60
-    ly = 222
-    d.text((mx, ly - 6), "THE DAY IN UTC", font=F(SANS_B, 11), fill=NAVY)
-    d.line([(lx0, ly), (lx1, ly)], fill=NAVY, width=2)
-    cap_f = F(SANS, 10)
-    time_f = F(SANS_B, 10)
-    n_ev = len(TIMELINE)
-    for i, (mins, tlabel, cap) in enumerate(TIMELINE):
-        fx = lx0 + i * (lx1 - lx0) / (n_ev - 1)
-        d.ellipse([fx - 4, ly - 4, fx + 4, ly + 4], fill=RED)
-        centre(d, fx, ly - 17, tlabel, time_f, NAVY)
-        lines = cap.split("\n")
-        cy = ly + 8
+    # top rule
+    d.rectangle([0, 0, W, 6], fill=RED)
+    # masthead
+    f_mast = font(SERIF, 30)
+    d.text((MX, 12), "THE WORLD IN ONE DAY", font=f_mast, fill=INK)
+    f_mast_r = font(SANS_B, 14)
+    rt = "FRIDAY \u00b7 27 NOVEMBER 2026"
+    d.text((W - MX - d.textlength(rt, font=f_mast_r), 20), rt, font=f_mast_r,
+           fill=RED)
+    d.line([MX, 56, W - MX, 56], fill=INK, width=2)
+    # giant dateline
+    f_date = font(SERIF, 40)
+    dt = "FRIDAY 27 NOVEMBER 2026"
+    d.text(((W - d.textlength(dt, font=f_date)) / 2, 62), dt, font=f_date,
+           fill=INK)
+    f_sub = font(SANS_B, 12)
+    sub = ("50 STORIES  \u00b7  13 REGIONS  \u00b7  19 FIELDS  \u00b7  ALL FIRST REPORTED "
+           "TODAY  \u00b7  AS OF %s" % AS_OF)
+    d.text(((W - d.textlength(sub, font=f_sub)) / 2, 108), sub, font=f_sub,
+           fill=NAVY)
+    # region chips
+    chip_order = [("EUROPE", 14), ("M. EAST", 5), ("E. ASIA", 6), ("S. ASIA", 4),
+                  ("SE ASIA", 2), ("OCEANIA", 3), ("N. AMER.", 6), ("GLOBAL", 3),
+                  ("N. AFR.", 1), ("W. AFR.", 1), ("E. AFR.", 1), ("S. AFR.", 1),
+                  ("LATAM", 3)]
+    assert sum(c for _, c in chip_order) == 50
+    f_chip = font(SANS_B, 11)
+    total_w = W - 2 * MX
+    cw = total_w // len(chip_order)
+    for i, (name, cnt) in enumerate(chip_order):
+        x0 = MX + i * cw
+        d.rounded_rectangle([x0 + 2, 128, x0 + cw - 2, 150], radius=4,
+                            outline=INK, width=1, fill=(255, 255, 255))
+        label = "%s %d" % (name, cnt)
+        d.text((x0 + cw / 2, 139), label, font=f_chip, fill=INK, anchor="mm")
+    # key numbers strip
+    f_kv = font(SANS_B, 17)
+    f_kl = font(SANS_B, 9)
+    kw = total_w // len(KEY_NUMBERS)
+    for i, (val, lab) in enumerate(KEY_NUMBERS):
+        x0 = MX + i * kw
+        d.rectangle([x0 + 2, 156, x0 + kw - 2, 192], fill=INK)
+        d.text((x0 + kw / 2, 168), val, font=f_kv, fill=(255, 255, 255),
+               anchor="mm")
+        d.text((x0 + kw / 2, 185), lab, font=f_kl, fill=(220, 220, 220),
+               anchor="mm")
+    # UTC timeline
+    f_tl = font(SANS_B, 11)
+    d.text((MX, 200), "THE DAY IN UTC", font=f_tl, fill=RED)
+    d.text((W - MX - d.textlength("00:30 \u2014 15:29 UTC", font=f_tl), 200),
+           "00:30 \u2014 15:29 UTC", font=f_tl, fill=GREY)
+    d.line([MX, 222, W - MX, 222], fill=INK, width=2)
+    tw = total_w // len(TIMELINE)
+    f_tt = font(SANS_B, 10)
+    f_td = font(SANS, 9)
+    for i, (t, label) in enumerate(TIMELINE):
+        cx = MX + i * tw + tw // 2
+        d.ellipse([cx - 4, 218, cx + 4, 226], fill=RED)
+        d.text((cx, 230), t, font=f_tt, fill=INK, anchor="ma")
+        lines = fit(d, label, f_td, tw - 8, 2)
+        ty = 244
         for ln in lines:
-            centre(d, fx, cy, ln, cap_f, INK)
-            cy += 12
+            d.text((cx, ty), ln, font=f_td, fill=INK, anchor="ma")
+            ty += 11
+    # big scenes
+    bw = (total_w - 16) // 3
+    for i, item in enumerate(PICTURED_BIG):
+        big_scene(d, MX + i * (bw + 8), 272, bw, 148, item)
+    # small scenes: 4 x 3
+    sw = (total_w - 24) // 4
+    for i, item in enumerate(PICTURED_SMALL):
+        row, col = divmod(i, 4)
+        small_scene(d, MX + col * (sw + 8), 428 + row * 64, sw, 58, item)
+    # ALSO LISTED
+    f_al = font(SANS_B, 12)
+    d.text((MX, 626), "ALSO LISTED \u2014 35 MORE STORIES, ALL FIRST REPORTED TODAY",
+           font=f_al, fill=RED)
+    d.line([MX, 644, W - MX, 644], fill=INK, width=2)
+    col_w = (total_w - 32) // 3
+    f_row = font(SANS, 10)
+    per_col = [12, 12, 11]
+    idx = 0
+    for c in range(3):
+        x0 = MX + c * (col_w + 16)
+        y = 652
+        for _ in range(per_col[c]):
+            headline, region, field = LISTED[idx]
+            idx += 1
+            text = "\u2022 %s" % headline
+            lines = fit(d, text, f_row, col_w, 2)
+            for ln in lines:
+                d.text((x0, y), ln, font=f_row, fill=INK)
+                y += 12
+            y += 2
+    assert idx == 35
+    # DATE CHECK + AS OF boxes
+    d.rounded_rectangle([MX, 912, MX + 640, 978], radius=5, outline=RED, width=2,
+                        fill=(255, 255, 255))
+    f_dc = font(SANS_B, 11)
+    d.text((MX + 10, 920), "DATE CHECK \u2014 LEFT OUT AFTER VERIFICATION", font=f_dc,
+           fill=RED)
+    f_dct = font(SANS, 10)
+    lines = fit(d, EXCLUDED, f_dct, 620, 3)
+    ty = 936
+    for ln in lines:
+        d.text((MX + 10, ty), ln, font=f_dct, fill=INK)
+        ty += 12
+    d.rounded_rectangle([MX + 652, 912, W - MX, 978], radius=5, outline=INK,
+                        width=2, fill=INK)
+    d.text((MX + 662, 920), "AS OF %s" % AS_OF, font=f_dc, fill=(255, 255, 255))
+    f_at = font(SANS, 10)
+    alines = fit(d, "The day continues after this image. Built Fri 27 Nov 2026.",
+                 f_at, W - MX - (MX + 662) - 10, 3)
+    ty = 936
+    for ln in alines:
+        d.text((MX + 662, ty), ln, font=f_at, fill=(255, 255, 255))
+        ty += 12
+    # footer
+    f_ft = font(SANS, 9)
+    flines = fit(d, SOURCES, f_ft, total_w, 2)
+    ty = 986
+    for ln in flines:
+        d.text((MX, ty), ln, font=f_ft, fill=GREY)
+        ty += 11
+    d.text((MX, 1008), "Round 5 \u00b7 daring-falcon-58 \u00b7 make.fun news-image-20261127",
+           font=f_ft, fill=GREY)
 
-    # ---- big scenes 258..388 (3 panels)
-    bw3 = (cw - 2 * 8) // 3
-    accents = {"P1": NAVY, "P5": RED, "P9": TEAL}
-    for i, (key, headline, body, rg, fd, src) in enumerate(BIG):
-        x0 = mx + i * (bw3 + 8)
-        draw_big_scene(d, [x0, 258, x0 + bw3, 388], key, headline, body, accents[key])
-
-    # ---- small scenes 392..566 (4 cols x 3 rows, 58px each)
-    sw = (cw - 3 * 8) // 4
-    sh = 56
-    for i, (headline, sub, glyph, colour, rg, fd) in enumerate(SMALL):
-        r, c = divmod(i, 4)
-        x0 = mx + c * (sw + 8)
-        y0 = 392 + r * (sh + 2)
-        panel(d, [x0, y0, x0 + sw, y0 + sh], WHITE, outline=LINE)
-        d.ellipse([x0 + 7, y0 + 8, x0 + 43, y0 + 44], fill=colour)
-        gf = F(SANS_B, 18)
-        gw = tw(d, glyph, gf)
-        d.text((x0 + 25 - gw / 2, y0 + 15), glyph, font=gf, fill=WHITE)
-        tx = x0 + 50
-        twd = x0 + sw - tx - 6
-        hl = fit(d, headline, F(SANS_B, 12), twd, 2, f"S{i+1}-headline")
-        yy = y0 + 6
-        for ln in hl:
-            d.text((tx, yy), ln, font=F(SANS_B, 12), fill=INK)
-            yy += 14
-        sl = fit(d, sub, F(SANS, 11), twd, 1, f"S{i+1}-sub")
-        d.text((tx, y0 + 40), sl[0], font=F(SANS, 11), fill=(70, 70, 70))
-
-    # ---- ALSO LISTED 570..956
-    d.text((mx, 574), "ALSO LISTED \u2014 35 MORE FRIDAY STORIES", font=F(SANS_B, 13), fill=NAVY)
-    d.line([(mx, 594), (W - mx, 594)], fill=GOLD, width=2)
-    colw = (cw - 2 * 10) // 3
-    row_h = 30
-    key_f = F(SANS_B, 11)
-    txt_f = F(SANS, 11)
-    for i, (key, headline, rg, fd) in enumerate(LISTED):
-        col, row = divmod(i, 12)
-        if col == 2 and row > 10:
-            col, row = 2, row  # 3rd column holds 11 rows (L25..L35)
-        x0 = mx + col * (colw + 10)
-        y0 = 600 + row * row_h
-        d.text((x0, y0), key, font=key_f, fill=RED)
-        kx = x0 + tw(d, key, key_f) + 6
-        hl = fit(d, headline, txt_f, x0 + colw - kx - 2, 1, key + "-listed")
-        d.text((kx, y0), hl[0], font=txt_f, fill=INK)
-
-    # ---- bottom strip 960..992: DATE CHECK + AS OF
-    panel(d, [mx, 960, mx + 640, 992], (255, 255, 255), outline=LINE)
-    d.text((mx + 8, 964), "DATE CHECK: 6 Thursday items caught & excluded \u2014 Bangkok blast, UK migration,",
-           font=F(SANS_B, 10), fill=NAVY)
-    d.text((mx + 8, 977), "N. Korea aid pause, Trump \u2018pull back\u2019, Wright biathlon, Quantum drone \u2014 full list in README.",
-           font=F(SANS, 10), fill=GREY)
-    centre(d, mx + 640 + (cw - 640) // 2, 966, "AS OF 13:30 UTC", F(SANS_B, 12), RED)
-    centre(d, mx + 640 + (cw - 640) // 2, 980, "THE DAY CONTINUES", F(SANS, 10), GREY)
-
-    # ---- footer 994..1024
-    centre(d, W // 2, 996,
-           "Sources: Reuters \u00b7 AP \u00b7 BBC \u00b7 Al Jazeera \u00b7 Consilium \u00b7 NBS \u00b7 NZ Herald \u00b7 Xinhua \u00b7 WAFA/QNA",
-           F(SANS, 10), GREY)
-    centre(d, W // 2, 1009,
-           "European Commission \u00b7 UNI Global Union \u00b7 FAO/WFP \u00b7 UNHCR \u00b7 NRF \u00b7 Adobe  |  Built by an AI agent for make.fun \u2014 daring-falcon-58",
-           F(SANS, 10), GREY)
-
-    out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "entry.png")
-    img.save(out, "JPEG", quality=88)
-    data = open(out, "rb").read()
-    print("wrote", out, len(data), "bytes", hashlib.sha256(data).hexdigest())
-    print("regions ok; fields:", sorted(fields.items(), key=lambda kv: -kv[1]))
+    img.save(OUT, "JPEG", quality=88)
+    return OUT
 
 
 if __name__ == "__main__":
-    main()
+    path = build()
+    size = os.path.getsize(path)
+    print("wrote %s (%d bytes)" % (path, size))
+    assert size <= 1048576, "image over 1 MiB"
+    with Image.open(path) as im:
+        assert im.size == (1024, 1024), im.size
+    print("OK: 1024x1024, under 1 MiB")

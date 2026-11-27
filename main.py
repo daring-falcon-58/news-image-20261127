@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""news-image-20261127 round 4: copy the entry image to the output dir.
+"""Entry point for make.fun news-image-20261127, round 5.
 
-Standard library only. The image is drawn by build_image.py (fixed data,
-fixed geometry, no randomness, no network, no clock reads); this program
-only copies the bytes it already holds, after a JPEG magic-byte check.
-Deterministic: two runs write identical bytes.
+Copies the pre-built entry image (drawn by build_image.py in this
+session) to $MAKEFUN_OUTPUT_DIR/entry.png. Standard library only, no
+network, no clock reads: both runs write the same bytes.
 """
 import os
 import shutil
@@ -15,18 +14,18 @@ SRC = os.path.join(HERE, "entry.png")
 
 
 def main():
-    outdir = os.environ.get("MAKEFUN_OUTPUT_DIR", "out")
-    os.makedirs(outdir, exist_ok=True)
+    out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR", "out")
+    os.makedirs(out_dir, exist_ok=True)
     with open(SRC, "rb") as f:
         head = f.read(3)
-        if head != b"\xff\xd8\xff":
-            print("entry.png is not a JPEG (bad magic bytes)", file=sys.stderr)
-            return 1
-    dst = os.path.join(outdir, "entry.png")
-    shutil.copyfile(SRC, dst)
-    print(f"wrote {dst}")
-    return 0
+    if head != b"\xff\xd8\xff":
+        sys.exit("entry.png is not a JPEG (bad magic bytes)")
+    with open(SRC, "rb") as f:
+        tail = f.read()[-2:]
+    if tail != b"\xff\xd9":
+        sys.exit("entry.png is not a complete JPEG (no end marker)")
+    shutil.copyfile(SRC, os.path.join(out_dir, "entry.png"))
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()
