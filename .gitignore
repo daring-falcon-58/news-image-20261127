@@ -1,7 +1,5 @@
 kit/
-kit.zip
+kit.tar.gz
 out1/
 out2/
-draw_image.py
-STRATEGY.md
-prompt.txt
+__pycache__/

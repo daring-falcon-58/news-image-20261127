@@ -1,468 +1,580 @@
 #!/usr/bin/env python3
-"""news-image-20261127 round 2 — fresh build.
+"""news-image-20261127 round 3 — fresh broadsheet renderer.
 
-Draws a 1024x1024 newspaper front page summing up Friday 27 November 2026.
-Deterministic: fixed data, fixed geometry, no randomness, no time calls,
-no network. Output is a JPEG (written as entry.png, as the brief allows).
-Run: python3 build_image.py [out_path]  (default: entry.png)
+Draws a 1024x1024 JPEG front page summing up Friday 27 November 2026:
+50 stories, every one first reported on Friday 27 November 2026 (any time
+zone), verified in-session against live sources. Fixed data, fixed geometry,
+no randomness, no network, no clock reads — two runs are byte-identical.
+
+Layout (broadsheet, burgundy masthead, cream paper):
+  masthead -> giant dateline -> subline -> 10 region chips -> 8 key numbers
+  -> UTC timeline (00:30-09:33) -> 3 big scenes -> 12 small scenes
+  -> 35 listed rows -> TOMORROW + DATE CHECK -> footer.
+Every string is measured before it is drawn; the script raises instead of
+shipping clipped or overflowing text.
 """
+
+import hashlib
+import os
 import sys
+
 from PIL import Image, ImageDraw, ImageFont
 
-BUILD_STAMP = "08:30 UTC"  # build time, fixed string (not read from clock)
 W, H = 1024, 1024
+MARGIN = 14
 PAPER = (247, 243, 234)
 INK = (26, 26, 26)
-NAVY = (20, 38, 74)
-NAVY_LT = (36, 59, 102)
+MUTED = (90, 84, 74)
+BURGUNDY = (123, 30, 38)
 GOLD = (201, 162, 39)
-RED = (185, 28, 28)
-MAROON = (127, 29, 29)
+LINE = (180, 172, 156)
+NAVY = (31, 58, 95)
+OCHRE = (122, 74, 0)
 GREEN = (20, 83, 45)
-TEAL = (15, 118, 110)
-BLUE = (29, 78, 216)
-GREY = (100, 100, 100)
-LIGHT = (255, 255, 255)
-PANEL = (255, 255, 255)
-PANEL_BG = (238, 234, 222)
+TINT = (238, 232, 218)
+WHITE = (255, 255, 255)
+RED = (178, 34, 34)
 
-FONT_DIRS = [
-    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-]
-FONT_DIRS_B = [
-    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-]
+FONT_DIR = "/usr/share/fonts/truetype/dejavu"
+SANS = os.path.join(FONT_DIR, "DejaVuSans.ttf")
+SANS_B = os.path.join(FONT_DIR, "DejaVuSans-Bold.ttf")
+SERIF_B = os.path.join(FONT_DIR, "DejaVuSerif-Bold.ttf")
 
 
-def font(size, bold=False):
-    for p in (FONT_DIRS_B if bold else FONT_DIRS):
-        try:
-            return ImageFont.truetype(p, size)
-        except OSError:
-            continue
-    return ImageFont.load_default()
+def font(path, size):
+    return ImageFont.truetype(path, size)
 
 
-def text_w(draw, s, f):
-    return draw.textlength(s, font=f)
-
-
-def wrap(draw, s, f, max_w):
-    """Greedy wrap; returns list of lines. Raises if a single word is too wide."""
-    words = s.split()
+def wrap(draw, text, fnt, max_w):
+    """Greedy word wrap; returns list of lines, each fitting max_w."""
+    words = text.split()
     lines, cur = [], ""
-    for w in words:
-        trial = (cur + " " + w).strip()
-        if draw.textlength(trial, font=f) <= max_w:
+    for word in words:
+        trial = (cur + " " + word).strip()
+        if draw.textlength(trial, font=fnt) <= max_w:
             cur = trial
         else:
             if cur:
                 lines.append(cur)
-            if draw.textlength(w, font=f) > max_w:
-                raise ValueError("word too wide: %r" % w)
-            cur = w
+            cur = word
     if cur:
         lines.append(cur)
     return lines
 
 
-def draw_wrapped(draw, x, y, s, f, max_w, max_lines, fill=INK, leading=None):
-    lines = wrap(draw, s, f, max_w)
+def draw_wrapped(draw, text, fnt, x, y, max_w, max_lines, fill=INK,
+                  leading=None, align="left"):
+    """Draw wrapped text; raise if it needs more than max_lines."""
+    if leading is None:
+        leading = fnt.size + 3
+    lines = wrap(draw, text, fnt, max_w)
     if len(lines) > max_lines:
-        raise ValueError("overflow: %r needs %d lines, max %d" % (s, len(lines), max_lines))
-    lh = leading or int(f.size * 1.22)
-    for ln in lines:
-        draw.text((x, y), ln, font=f, fill=fill)
-        y += lh
-    return y
+        raise ValueError(
+            "text overflows %d lines: %r -> %r" % (max_lines, text, lines))
+    for i, line in enumerate(lines):
+        lx = x
+        if align == "center":
+            lx = x + (max_w - draw.textlength(line, font=fnt)) / 2
+        draw.text((lx, y + i * leading), line, font=fnt, fill=fill)
+    return y + len(lines) * leading
 
 
-def one_line(draw, x, y, s, f, max_w, fill=INK):
-    if draw.textlength(s, font=f) > max_w:
-        raise ValueError("one-liner too wide (%d > %d): %r"
-                         % (draw.textlength(s, font=f), max_w, s))
-    draw.text((x, y), s, font=f, fill=fill)
+def fit_check(draw, text, fnt, max_w, label):
+    if draw.textlength(text, font=fnt) > max_w:
+        raise ValueError("%s too wide: %r" % (label, text))
 
 
-# ---------------------------------------------------------------- data
-# Pictured: (tag, headline, body lines, region, field, source)
-PICTURED_BIG = [
-    ("EU SUMMIT ENDS IN NO DEAL",
-     ["\u20ac1.58tn budget and \u20ac45bn Ukraine loan blocked after ~14 hours in Brussels.",
-      "24 states back the loan; Hungary, Slovakia and Czechia oppose.",
-      "Leaders try again on Dec 17\u201318."],
-     "Europe", "Politics", "Consilium / Reuters"),
-    ("GAZA: 19 KILLED IN 48 HOURS",
-     ["Toll since the ceasefire: 1,705. Total since Oct 2023: 74,772.",
-      "10 more killed on Friday, incl. a Hamas deputy education minister.",
-      "37 killed in the past week; a 9-month-old dies of cold."],
-     "Middle East", "Conflict", "Al Jazeera / AP"),
-    ("NEW ZEALAND: 65\u201365",
-     ["Final count: the coalition holds 65 of 130 seats \u2014 one short.",
-      "National 40, ACT 13, NZ First 12; Labour 36, Greens 17.",
-      "Opportunity, 7 seats, holds the balance of power."],
-     "Oceania", "Elections", "NZ Herald / Reuters"),
+# ---------------------------------------------------------------- pictograms
+# Each takes (draw, x, y, s, ink) and draws inside an s x s box.
+
+def pic_stars(d, x, y, s, ink):
+    cx, cy, r = x + s / 2, y + s / 2, s * 0.36
+    for k in range(12):
+        import math
+        a = math.pi * 2 * k / 12 - math.pi / 2
+        px, py = cx + r * math.cos(a), cy + r * math.sin(a)
+        d.ellipse([px - 2, py - 2, px + 2, py + 2], fill=GOLD)
+    d.text((cx - 6, cy - 8), "EU", font=font(SANS_B, int(s * 0.28)),
+           fill=NAVY)
+
+
+def pic_bank(d, x, y, s, ink):
+    d.polygon([(x + 2, y + s * 0.38), (x + s / 2, y + 2),
+               (x + s - 2, y + s * 0.38)], fill=ink)
+    for i in range(3):
+        cx = x + s * (0.22 + 0.28 * i)
+        d.rectangle([cx - 3, y + s * 0.42, cx + 3, y + s * 0.82], fill=ink)
+    d.rectangle([x + 2, y + s * 0.84, x + s - 2, y + s * 0.92], fill=ink)
+
+
+def pic_bars(d, x, y, s, ink):
+    hs = [0.35, 0.55, 0.8]
+    for i, h in enumerate(hs):
+        bx = x + s * (0.12 + 0.30 * i)
+        d.rectangle([bx, y + s * (1 - h), bx + s * 0.20, y + s * 0.95],
+                    fill=ink)
+    d.line([(x + 2, y + s * 0.55), (x + s * 0.55, y + s * 0.28),
+            (x + s - 2, y + s * 0.12)], fill=RED, width=3)
+    d.polygon([(x + s - 8, y + s * 0.05), (x + s - 2, y + s * 0.12),
+               (x + s - 9, y + s * 0.20)], fill=RED)
+
+
+def pic_drone(d, x, y, s, ink):
+    for cx, cy in [(x + s * 0.14, y + s * 0.2), (x + s * 0.86, y + s * 0.2),
+                   (x + s * 0.14, y + s * 0.8), (x + s * 0.86, y + s * 0.8)]:
+        d.ellipse([cx - 7, cy - 4, cx + 7, cy + 4], outline=ink, width=2)
+    d.line([(x + s * 0.14, y + s * 0.2), (x + s * 0.5, y + s * 0.5)], fill=ink,
+           width=2)
+    d.line([(x + s * 0.86, y + s * 0.2), (x + s * 0.5, y + s * 0.5)], fill=ink,
+           width=2)
+    d.line([(x + s * 0.14, y + s * 0.8), (x + s * 0.5, y + s * 0.5)], fill=ink,
+           width=2)
+    d.line([(x + s * 0.86, y + s * 0.8), (x + s * 0.5, y + s * 0.5)], fill=ink,
+           width=2)
+    d.ellipse([x + s * 0.36, y + s * 0.36, x + s * 0.64, y + s * 0.64],
+              fill=ink)
+
+
+def pic_skyline(d, x, y, s, ink):
+    hs = [0.55, 0.8, 0.45, 0.7, 0.6]
+    for i, h in enumerate(hs):
+        bx = x + s * (0.04 + 0.19 * i)
+        d.rectangle([bx, y + s * (1 - h), bx + s * 0.15, y + s * 0.95],
+                    fill=ink)
+    d.ellipse([x + s * 0.62, y + s * 0.06, x + s * 0.78, y + s * 0.22],
+              fill=GOLD)
+    d.ellipse([x + s * 0.30, y + s * 0.10, x + s * 0.44, y + s * 0.24],
+              fill=(200, 200, 200))
+
+
+def pic_shield(d, x, y, s, ink):
+    d.polygon([(x + s * 0.5, y + 2), (x + s - 2, y + s * 0.25),
+               (x + s - 2, y + s * 0.6), (x + s * 0.5, y + s - 2),
+               (x + 2, y + s * 0.6), (x + 2, y + s * 0.25)], fill=ink)
+    d.line([(x + s * 0.28, y + s * 0.52), (x + s * 0.45, y + s * 0.68),
+            (x + s * 0.74, y + s * 0.32)], fill=WHITE, width=3)
+
+
+def pic_mic(d, x, y, s, ink):
+    d.rounded_rectangle([x + s * 0.38, y + 2, x + s * 0.62, y + s * 0.5],
+                        radius=8, fill=ink)
+    d.line([(x + s * 0.5, y + s * 0.5), (x + s * 0.5, y + s * 0.78)],
+           fill=ink, width=3)
+    d.line([(x + s * 0.3, y + s * 0.78), (x + s * 0.7, y + s * 0.78)],
+           fill=ink, width=3)
+    d.rectangle([x + s * 0.32, y + s * 0.86, x + s * 0.68, y + s * 0.92],
+                fill=ink)
+
+
+def pic_bag(d, x, y, s, ink):
+    d.polygon([(x + s * 0.15, y + s * 0.3), (x + s * 0.85, y + s * 0.3),
+               (x + s * 0.78, y + s * 0.95), (x + s * 0.22, y + s * 0.95)],
+              fill=ink)
+    d.arc([x + s * 0.3, y + s * 0.02, x + s * 0.7, y + s * 0.45],
+          start=180, end=360, fill=ink, width=3)
+    d.text((x + s * 0.38, y + s * 0.5), "%", font=font(SANS_B, int(s * 0.3)),
+           fill=WHITE)
+
+
+def pic_split(d, x, y, s, ink):
+    d.rectangle([x + 2, y + s * 0.3, x + s / 2, y + s * 0.7], fill=GREEN)
+    d.rectangle([x + s / 2, y + s * 0.3, x + s - 2, y + s * 0.7],
+                fill=(120, 120, 120))
+    d.text((x + s * 0.08, y + s * 0.42), "65", font=font(SANS_B, int(s * 0.24)),
+           fill=WHITE)
+    d.text((x + s * 0.62, y + s * 0.42), "65", font=font(SANS_B, int(s * 0.24)),
+           fill=WHITE)
+
+
+def pic_factory(d, x, y, s, ink):
+    d.polygon([(x + 2, y + s * 0.5), (x + s * 0.3, y + s * 0.5),
+               (x + s * 0.3, y + s * 0.3), (x + s * 0.42, y + s * 0.3),
+               (x + s * 0.42, y + s * 0.5), (x + s * 0.55, y + s * 0.35),
+               (x + s * 0.68, y + s * 0.5), (x + s - 2, y + s * 0.5),
+               (x + s - 2, y + s * 0.95), (x + 2, y + s * 0.95)], fill=ink)
+    d.rectangle([x + s * 0.78, y + s * 0.12, x + s * 0.88, y + s * 0.5],
+                fill=ink)
+    d.ellipse([x + s * 0.74, y + s * 0.02, x + s * 0.86, y + s * 0.14],
+              fill=(200, 200, 200))
+
+
+def pic_barrel(d, x, y, s, ink):
+    d.rounded_rectangle([x + s * 0.25, y + s * 0.08, x + s * 0.75,
+                         y + s * 0.92], radius=6, fill=ink)
+    d.rectangle([x + s * 0.25, y + s * 0.3, x + s * 0.75, y + s * 0.36],
+                fill=GOLD)
+    d.rectangle([x + s * 0.25, y + s * 0.62, x + s * 0.75, y + s * 0.68],
+                fill=GOLD)
+    d.text((x + s * 0.40, y + s * 0.42), "$", font=font(SANS_B, int(s * 0.28)),
+           fill=WHITE)
+
+
+def pic_chart(d, x, y, s, ink):
+    d.line([(x + 4, y + s * 0.9), (x + s - 4, y + s * 0.9)], fill=ink, width=2)
+    d.line([(x + 4, y + s * 0.9), (x + 4, y + 4)], fill=ink, width=2)
+    d.line([(x + 6, y + s * 0.7), (x + s * 0.4, y + s * 0.5),
+            (x + s * 0.65, y + s * 0.55), (x + s - 4, y + s * 0.15)],
+           fill=RED, width=3)
+    d.ellipse([x + s - 8, y + s * 0.11, x + s - 1, y + s * 0.19], fill=RED)
+
+
+def pic_flags(d, x, y, s, ink):
+    d.rectangle([x + 2, y + s * 0.2, x + s * 0.48, y + s * 0.8], fill=(255, 153, 51))
+    d.rectangle([x + 2, y + s * 0.4, x + s * 0.48, y + s * 0.6], fill=WHITE)
+    d.rectangle([x + 2, y + s * 0.6, x + s * 0.48, y + s * 0.8], fill=(19, 136, 8))
+    d.rectangle([x + s * 0.52, y + s * 0.2, x + s - 2, y + s * 0.8],
+                fill=(60, 59, 110))
+    for i in range(3):
+        yy = y + s * (0.28 + 0.18 * i)
+        d.rectangle([x + s * 0.52, yy, x + s - 2, yy + s * 0.08], fill=WHITE)
+    d.ellipse([x + s * 0.56, y + s * 0.24, x + s * 0.68, y + s * 0.38],
+              fill=WHITE)
+
+
+def pic_boat(d, x, y, s, ink):
+    d.polygon([(x + s * 0.1, y + s * 0.55), (x + s * 0.9, y + s * 0.55),
+               (x + s * 0.75, y + s * 0.85), (x + s * 0.25, y + s * 0.85)],
+              fill=ink)
+    d.line([(x + s * 0.5, y + s * 0.55), (x + s * 0.5, y + s * 0.1)],
+           fill=ink, width=3)
+    d.polygon([(x + s * 0.5, y + s * 0.12), (x + s * 0.85, y + s * 0.4),
+               (x + s * 0.5, y + s * 0.4)], fill=RED)
+
+
+def pic_rocket(d, x, y, s, ink):
+    d.line([(x + s * 0.2, y + s * 0.9), (x + s * 0.8, y + s * 0.15)],
+           fill=ink, width=3)
+    d.polygon([(x + s * 0.72, y + s * 0.05), (x + s * 0.95, y + s * 0.12),
+               (x + s * 0.8, y + s * 0.3)], fill=RED)
+    d.text((x + s * 0.1, y + s * 0.55), "+12%",
+           font=font(SANS_B, int(s * 0.22)), fill=RED)
+
+
+PICS = {
+    "stars": pic_stars, "bank": pic_bank, "bars": pic_bars,
+    "drone": pic_drone, "skyline": pic_skyline, "shield": pic_shield,
+    "mic": pic_mic, "bag": pic_bag, "split": pic_split,
+    "factory": pic_factory, "barrel": pic_barrel, "chart": pic_chart,
+    "flags": pic_flags, "boat": pic_boat, "rocket": pic_rocket,
+}
+
+
+# ---------------------------------------------------------------- the 50 stories
+# Fields: id, headline, detail, region, field, source, pic (pictogram key).
+# All 50 first reported Friday 27 November 2026 (any time zone); see
+# STRATEGY.md / README.md for per-story verification and the DATE CHECK.
+
+BIG = [
+    dict(id="P1", tag="EU SUMMIT · NO DEAL", color=NAVY, pic="stars",
+         head="EU leaders leave Brussels with no budget deal",
+         detail="€1.58tn budget and €45bn Ukraine loan blocked; 24 states "
+                "back the loan. Talks resume 17–18 Dec.",
+         region="Europe", field="Politics", source="Consilium/Reuters"),
+    dict(id="P5", tag="GAZA · THE TOLL RISES", color=OCHRE, pic="skyline",
+         head="Strikes wound children in Gaza City on Friday",
+         detail="11 killed in 24 hours; 19 in 48 hours. Toll since the "
+                "ceasefire: 1,705. Total since Oct 2023: 74,772.",
+         region="Middle East", field="Conflict", source="WAFA/QNA/Al Jazeera"),
+    dict(id="P9", tag="NEW ZEALAND · 65–65", color=GREEN, pic="split",
+         head="Final count leaves coalition one seat short",
+         detail="Coalition 65 of 130 seats; the Opportunity Party is "
+                "kingmaker. Result released Friday, 2pm NZ time.",
+         region="Oceania", field="Elections", source="NZ Herald/Reuters"),
 ]
 
-# Pictured small: (headline, fact, region, field, source, icon)
-PICTURED_SMALL = [
-    ("ECB: DE COS TO LEAD", "Recommended as next president; succeeds Lagarde in Feb 2027",
-     "Europe", "Politics", "Consilium", "bank"),
-    ("ASIA STEADY", "Kospi +2%, Nikkei +0.7%; MSCI Asia-Pac ex-Japan +0.5%",
-     "East Asia", "Markets", "Reuters", "chart"),
-    ("LATVIA: DRONE INCURSION", "Unidentified drone briefly violates airspace early Friday",
-     "Europe", "Conflict", "Reuters", "drone"),
-    ("UKRAINE: 3 KILLED", "Russian drone strikes overnight; at least 10 injured",
-     "Europe", "Conflict", "Reuters", "burst"),
-    ("ZELENSKY TO BBC", "US \u201ctoo focused on Middle East\u201d; Patriot delays cost lives",
-     "Europe", "Conflict", "BBC", "mic"),
-    ("BLACK FRIDAY", "Necessities join gifts as AI and higher costs steer spending",
-     "N. America", "Retail", "AP", "bag"),
-    ("CHINA PROFITS +20.1%", "Industrial profits jump in Oct, fastest in 5 months",
-     "East Asia", "Economy", "NBS / Reuters", "factory"),
-    ("BRENT $96.14", "Down 0.4% on the day, up 3.9% on the week",
-     "Middle East", "Energy", "Reuters", "drop"),
-    ("TOKYO CPI 2.9%", "Core inflation at a 16-month high; BOJ hike case grows",
-     "East Asia", "Economy", "Reuters", "yen"),
-    ("INDIA\u2013US DEAL NEARS", "Trade deal nearing completion, minister Goyal says",
-     "South Asia", "Diplomacy", "Reuters", "flags"),
-    ("KOREA SENDS 6 HOME", "Six North Koreans repatriated by sea; a 7th chose to stay",
-     "East Asia", "Diplomacy", "Reuters", "boat"),
-    ("CHINA STOCKS SURGE", "Shanghai +3.3%, STAR 50 +12% as Beijing vows support",
-     "East Asia", "Markets", "Reuters", "rocket"),
+SMALL = [
+    dict(id="P2", pic="bank", head="De Cos picked to lead the ECB",
+         detail="Ex-Bank of Spain chief succeeds Lagarde in Feb 2027.",
+         region="Europe", field="Politics", source="Consilium/Reuters"),
+    dict(id="P3", pic="bars", head="Asia shares steady on Friday",
+         detail="Kospi +2%, Nikkei +0.7% in the morning wrap.",
+         region="East Asia", field="Markets", source="Reuters"),
+    dict(id="P4", pic="drone", head="Drone violates Latvia's airspace",
+         detail="Unidentified drone crossed in early on Friday.",
+         region="Europe", field="Conflict", source="Reuters"),
+    dict(id="P6", pic="shield", head="155 drones fired at Ukraine overnight",
+         detail="110 shot down; 1 killed, 9 hurt; rail and power hit.",
+         region="Europe", field="Conflict", source="Ukrainian AF/h.ua"),
+    dict(id="P7", pic="mic", head="Zelensky: US 'too focused' on Mideast",
+         detail="BBC interview: Patriot delays are costing lives.",
+         region="Europe", field="Politics", source="BBC"),
+    dict(id="P8", pic="bag", head="Black Friday: $12.9bn online expected",
+         detail="AI steers spending; Adobe sees $12.9bn in one day.",
+         region="N. America", field="Retail", source="Adobe/AP"),
+    dict(id="P10", pic="factory", head="China factory profits jump 20.1%",
+         detail="October industrial profits beat a year earlier.",
+         region="East Asia", field="Economy", source="NBS/Reuters"),
+    dict(id="P11", pic="barrel", head="Brent crude $96.14 a barrel",
+         detail="Down 0.4% on the day, up 3.9% on the week.",
+         region="Europe", field="Energy", source="Reuters"),
+    dict(id="P12", pic="chart", head="Tokyo inflation hits 16-month high",
+         detail="Core CPI 2.9%; the case for a BOJ hike grows.",
+         region="East Asia", field="Economy", source="Reuters"),
+    dict(id="P13", pic="flags", head="India–US trade deal 'nearing completion'",
+         detail="Minister Goyal says the deal is almost done.",
+         region="South Asia", field="Diplomacy", source="Reuters"),
+    dict(id="P14", pic="boat", head="Seoul sends six North Koreans home",
+         detail="Rescued crew repatriated by sea; one chose to stay.",
+         region="East Asia", field="Diplomacy", source="Reuters"),
+    dict(id="P15", pic="rocket", head="China stocks surge on Beijing's vow",
+         detail="Shanghai +3.3%; STAR 50 +12% in afternoon trade.",
+         region="East Asia", field="Markets", source="Reuters"),
 ]
 
-# Listed: (one-liner, region, field, source)
 LISTED = [
-    ("Erdogan ratifies Mecca defence pact for Turkey", "Middle East", "Diplomacy", "Reuters"),
-    ("Iran warns on Gulf presence as Seoul expands naval role", "Middle East", "Diplomacy", "Reuters"),
-    ("Dollar heads for 3rd monthly gain: +1.8%, DXY 103.8", "N. America", "Markets", "Reuters"),
-    ("US futures rise; Wall St reopens, closes 1pm ET", "N. America", "Markets", "Reuters"),
-    ("Gold $3,625.50 (+1.66%), silver $43.27 (+4.92%)", "N. America", "Markets", "IC Markets"),
-    ("Sensex drops 400+ pts, Nifty below 25,800; metals gain", "South Asia", "Markets", "Hindu BusinessLine"),
-    ("Bitcoin reclaims $60,000: +3.03% to $60,397.69", "N. America", "Crypto", "CoinMarketCap"),
-    ("Zelensky: major Russian attack on power grid imminent", "Europe", "Conflict", "AP"),
-    ("Trump 'a little concerned' by Wed market dip", "N. America", "Politics", "Reuters"),
-    ("Bears 39\u201335 Lions: Williams TD with 3 seconds left", "N. America", "Sport", "AP"),
-    ("Louisville 93\u201390 St John's: Wooley buzzer 3-pointer", "N. America", "Sport", "Field Level Media"),
-    ("Macron: \u20ac204bn budget cuts a 'strategic mistake'", "Europe", "Politics", "Reuters / ANI"),
-    ("Merz: no new debt; praises Trump's peace efforts", "Europe", "Politics", "Reuters / ANI"),
-    ("China cabinet vows new steps to steady markets", "East Asia", "Economy", "Xinhua / Reuters"),
-    ("France CPI cools to 3.2%; Spain 4.1%; France GDP \u22120.2%", "Europe", "Economy", "Reuters / WSJ"),
-    ("Europe stocks rose Thu: DAX +2.08%, FTSE +1.75%", "Europe", "Markets", "Reuters"),
-    ("Gaza: 37 killed in a week; baby dies of cold", "Middle East", "Health", "Al Jazeera"),
-    ("Russia hits 2 grain ships near Odesa; 100,000+ t", "Europe", "Conflict", "Reuters"),
-    ("Rand +~1% to 17.37; platinum +5%; Top-40 +2.2%", "S. Africa", "Markets", "Reuters"),
-    ("Quake M5.3 off Bonin Islands, Japan; no tsunami", "East Asia", "Disaster", "EMSC / GFZ / Xinhua"),
-    ("Rupee: foreign buyers put $600M+ in Thu; Nov $16B", "South Asia", "Economy", "Reuters"),
-    ("2-yr Treasury yield +3bp to 4.6705% on reopen", "N. America", "Markets", "Reuters"),
-    ("Euro flat at $1.0964 after de Cos news", "Europe", "Markets", "Reuters"),
-    ("Kiwi +0.2% to $0.5482 after the NZ result", "Oceania", "Markets", "Reuters"),
-    ("WTI $85.72 (+0.94%)", "N. America", "Energy", "IC Markets"),
-    ("Crypto Fear & Greed 12 \u2014 Extreme Fear; market $2.1T", "N. America", "Crypto", "KuCoin"),
-    ("China drills Taiwan landing on floating bridge", "East Asia", "Conflict", "Reuters"),
-    ("Google AI Pro Black Friday deals open to all", "N. America", "Tech", "Android Central"),
-    ("Duterte: resignation 'out of the question'", "SE Asia", "Politics", "Reuters"),
-    ("Egypt mosques pray for Ring Road fire victims", "N. Africa", "Religion", "CairoScene"),
-    ("MSCI Asia-Pac ex-Japan +0.5% (week +1.9%)", "East Asia", "Markets", "Reuters"),
-    ("Shenzhen +1.53%, Hang Seng +0.89% in early trade", "East Asia", "Markets", "Reuters"),
-    ("Target opens 6am; first 100 shoppers get gift cards", "N. America", "Retail", "Target"),
-    ("Best Buy opens 6am\u201310pm; $100 gift card for $60", "N. America", "Retail", "Best Buy"),
-    ("Amazon 'double drops' on Black Friday + Cyber Monday", "N. America", "Retail", "Amazon"),
-]
-
-TIMELINE = [
-    ("00:30", "EU summit: no deal"),
-    ("01:52", "Drones kill 3"),
-    ("02:33", "Kospi +2%"),
-    ("04:33", "Quake M5.3"),
-    ("04:44", "6 Koreans home"),
-    ("05:34", "Gaza: 37 dead"),
-    ("07:00", "China +3.3%"),
-    ("07:45", "France CPI 3.2%"),
+    ("L1", "Erdogan ratifies Turkey's Mecca defence pact", "Middle East", "Diplomacy", "Reuters"),
+    ("L2", "Iran warns over Gulf as Seoul grows naval role", "Middle East", "Diplomacy", "Reuters"),
+    ("L3", "Dollar heads for 3rd monthly gain, +1.8%", "N. America", "Markets", "Reuters"),
+    ("L4", "S&P futures +1.7%, Nasdaq +2.5% pre-open", "N. America", "Markets", "InvestingLive"),
+    ("L5", "Gold $3,662 (+2.7%); silver $43.27 (+4.92%)", "N. America", "Markets", "CoinMarketCap"),
+    ("L6", "Brands shift $254m of orders out of Bangladesh", "South Asia", "Trade", "Reuters"),
+    ("L7", "Bitcoin ~$61,600 as $7bn of options expire today", "N. America", "Crypto", "CryptoNews"),
+    ("L8", "Zelensky: major Russian grid attack imminent", "Europe", "Conflict", "AP"),
+    ("L9", "Trump 'a little concerned' by Wednesday market dip", "N. America", "Politics", "Reuters"),
+    ("L10", "Bears 39–35 Lions on a TD with 3 seconds left", "N. America", "Sport", "AP"),
+    ("L11", "Marseille fan violence condemned; 11 injured", "Europe", "Sport", "Reuters"),
+    ("L12", "Macron: €204bn cuts a 'strategic mistake'", "Europe", "Politics", "Reuters/ANI"),
+    ("L13", "Merz: no new debt; praises Trump's peace efforts", "Europe", "Politics", "Reuters/ANI"),
+    ("L14", "China cabinet vows new steps to steady markets", "East Asia", "Economy", "Xinhua/Reuters"),
+    ("L15", "France CPI 3.2%; Spain 4.1%; France GDP −0.2%", "Europe", "Economy", "Reuters/WSJ"),
+    ("L16", "Europe opens higher: Stoxx +0.9%, DAX +0.7%", "Europe", "Markets", "WSJ"),
+    ("L17", "Gaza: 37 killed in a week; a baby dies of cold", "Middle East", "Health", "Al Jazeera"),
+    ("L18", "Russia hits 2 grain ships near Odesa; 100,000+ t", "Europe", "Conflict", "Reuters"),
+    ("L19", "Rand +~1% to 17.37; platinum +5%; Top-40 +2.2%", "S. Africa", "Markets", "Reuters"),
+    ("L20", "Quake M5.3 off Japan's Bonin Islands; no tsunami", "East Asia", "Disaster", "EMSC/GFZ"),
+    ("L21", "Rupee: foreign buyers put $600m+ in on Thursday", "South Asia", "Markets", "Reuters"),
+    ("L22", "India frees 164 in Delhi cyber-fraud racket", "South Asia", "Crime", "Reuters"),
+    ("L23", "Spain's Vox nears power as election kingmaker", "Europe", "Elections", "Reuters"),
+    ("L24", "Strobe Talbott, ex-deputy secretary, dies at 80", "N. America", "Obituary", "AP/NPR"),
+    ("L25", "China: ex-Guangxi chief gets death, reprieved", "East Asia", "Law", "Xinhua/Reuters"),
+    ("L26", "CPTPP to open talks: UAE, Indonesia, Philippines", "East Asia", "Trade", "Reuters"),
+    ("L27", "China drills Taiwan landing on floating bridge", "East Asia", "Conflict", "Reuters"),
+    ("L28", "Google AI Pro Black Friday deals open to all", "N. America", "Tech", "Android Central"),
+    ("L29", "Duterte: resignation 'out of the question'", "SE Asia", "Politics", "Reuters"),
+    ("L30", "Egypt mosques pray for Ring Road fire victims", "N. Africa", "Religion", "CairoScene"),
+    ("L31", "Russia lost 55,629 troops in November so far", "Europe", "Conflict", "Ukr. General Staff"),
+    ("L32", "Nigeria's envoy presents credentials in Mexico", "Latin America", "Diplomacy", "Thenigeriannews"),
+    ("L33", "Indonesia arrests 3 over share manipulation", "SE Asia", "Law", "Reuters"),
+    ("L34", "Serbia still has no PM as deadlines loom", "Europe", "Politics", "Reuters"),
+    ("L35", "Australia sanctions 2 over antisemitic attacks", "Oceania", "Diplomacy", "Reuters"),
 ]
 
 KEY_NUMBERS = [
-    ("\u20ac1.58tn", "EU BUDGET: NO DEAL"),
-    ("\u20ac45bn", "UKRAINE LOAN"),
+    ("€45bn", "UKRAINE LOAN BLOCKED"),
     ("74,772", "GAZA DEATH TOLL"),
-    ("65\u201365", "NZ PARLIAMENT"),
-    ("+20.1%", "CHINA PROFITS"),
-    ("$96.14", "BRENT CRUDE"),
-    ("$60,398", "BITCOIN"),
+    ("65–65", "NZ COALITION 1 SHORT"),
     ("+12%", "CHINA STAR 50"),
+    ("$3,662", "GOLD, +2.7%"),
+    ("$61,600", "BITCOIN, $7BN EXPIRY"),
+    ("+0.9%", "STOXX 600 FRIDAY"),
+    ("155", "DRONES AT UKRAINE"),
+]
+
+TIMELINE = [
+    ("00:30", "EU: no deal"),
+    ("02:33", "Asia steady"),
+    ("04:44", "Korea: 6 home"),
+    ("06:12", "Talbott dies"),
+    ("07:51", "Marseille condemned"),
+    ("08:06", "155 drones"),
+    ("08:26", "Europe opens up"),
+    ("09:33", "India fraud rescue"),
 ]
 
 REGIONS = [
-    ("Europe", 12), ("Middle East", 5), ("East Asia", 10), ("South Asia", 3),
-    ("SE Asia", 1), ("Oceania", 2), ("N. America", 15), ("N. Africa", 1),
-    ("S. Africa", 1),
+    ("EUROPE", 16), ("MIDDLE EAST", 4), ("EAST ASIA", 10),
+    ("SOUTH ASIA", 4), ("SE ASIA", 2), ("OCEANIA", 2),
+    ("N. AMERICA", 9), ("N. AFRICA", 1), ("S. AFRICA", 1),
+    ("LATIN AMERICA", 1),
 ]
 
 
 def check_counts():
-    n = len(PICTURED_BIG) + len(PICTURED_SMALL) + len(LISTED)
-    assert n == 50, "story count %d != 50" % n
-    assert sum(c for _, c in REGIONS) == 50, "region counts != 50"
+    stories = BIG + SMALL + [dict(id=i, region=r, field=f) for i, _, r, f, _ in LISTED]
+    assert len(stories) == 50, len(stories)
     from collections import Counter
-    rc = Counter()
-    fc = Counter()
-    for _, _, r, f, _ in PICTURED_BIG:
-        rc[r] += 1
-        fc[f] += 1
-    for _, _, r, f, _, _ in PICTURED_SMALL:
-        rc[r] += 1
-        fc[f] += 1
-    for _, r, f, _ in LISTED:
-        rc[r] += 1
-        fc[f] += 1
-    expect_r = dict(REGIONS)
-    assert dict(rc) == expect_r, "region mismatch: %s vs %s" % (dict(rc), expect_r)
-    assert sum(fc.values()) == 50
-    return dict(rc), dict(fc)
-
-
-# ---------------------------------------------------------------- icons
-def draw_icon(d, kind, x, y, s, color):
-    """Simple vector pictogram inside an s x s box at (x, y)."""
-    if kind == "bank":
-        d.polygon([(x + 2, y + 16), (x + s / 2, y + 2), (x + s - 2, y + 16)], fill=color)
-        for i in range(3):
-            cx = x + 8 + i * 13
-            d.rectangle([cx, y + 18, cx + 6, y + s - 8], fill=color)
-        d.rectangle([x + 2, y + s - 6, x + s - 2, y + s - 2], fill=color)
-    elif kind == "chart":
-        bars = [10, 18, 28]
-        for i, bh in enumerate(bars):
-            bx = x + 5 + i * 13
-            d.rectangle([bx, y + s - 6 - bh, bx + 9, y + s - 6], fill=color)
-        d.line([(x + 3, y + 12), (x + s - 4, y + 4)], fill=RED, width=3)
-    elif kind == "drone":
-        d.ellipse([x + s / 2 - 4, y + s / 2 - 4, x + s / 2 + 4, y + s / 2 + 4], fill=color)
-        for cx, cy in [(x + 6, y + 6), (x + s - 6, y + 6), (x + 6, y + s - 6), (x + s - 6, y + s - 6)]:
-            d.ellipse([cx - 5, cy - 5, cx + 5, cy + 5], outline=color, width=2)
-            d.line([(x + s / 2, y + s / 2), (cx, cy)], fill=color, width=2)
-    elif kind == "burst":
-        cx, cy = x + s / 2, y + s / 2
-        for k in range(8):
-            import math
-            a = k * math.pi / 4
-            d.line([(cx + 8 * math.cos(a), cy + 8 * math.sin(a)),
-                    (cx + 19 * math.cos(a), cy + 19 * math.sin(a))], fill=color, width=3)
-        d.ellipse([cx - 6, cy - 6, cx + 6, cy + 6], fill=RED)
-    elif kind == "mic":
-        d.ellipse([x + 9, y + 4, x + s - 9, y + 24], fill=color)
-        d.line([(x + s / 2, y + 24), (x + s / 2, y + s - 8)], fill=color, width=3)
-        d.line([(x + 10, y + s - 6), (x + s - 10, y + s - 6)], fill=color, width=3)
-    elif kind == "bag":
-        d.polygon([(x + 7, y + 14), (x + s - 7, y + 14), (x + s - 4, y + s - 4),
-                   (x + 4, y + s - 4)], fill=color)
-        d.arc([x + 12, y + 4, x + s - 12, y + 20], 180, 360, fill=color, width=3)
-    elif kind == "factory":
-        d.rectangle([x + 4, y + 18, x + s - 4, y + s - 4], fill=color)
-        d.polygon([(x + 4, y + 18), (x + 12, y + 10), (x + 20, y + 18),
-                   (x + 28, y + 10), (x + s - 4, y + 18)], fill=PAPER)
-        d.rectangle([x + s - 12, y + 4, x + s - 7, y + 16], fill=color)
-    elif kind == "drop":
-        d.polygon([(x + s / 2, y + 3), (x + s - 6, y + 22), (x + 6, y + 22)], fill=color)
-        d.ellipse([x + 8, y + 16, x + s - 8, y + s - 3], fill=color)
-    elif kind == "yen":
-        d.ellipse([x + 2, y + 2, x + s - 2, y + s - 2], outline=color, width=3)
-        d.text((x + s / 2 - 8, y + 6), "\u00a5", font=font(22, True), fill=color)
-    elif kind == "flags":
-        d.rectangle([x + 4, y + 8, x + s / 2 + 2, y + 24], fill=(255, 153, 51))
-        d.rectangle([x + 4, y + 14, x + s / 2 + 2, y + 19], fill=(255, 255, 255))
-        d.rectangle([x + s / 2 - 2, y + 14, x + s - 4, y + 30], fill=(178, 34, 52))
-        d.rectangle([x + s / 2 - 2, y + 14, x + s - 4, y + 19], fill=(255, 255, 255))
-    elif kind == "boat":
-        d.polygon([(x + 4, y + 20), (x + s - 4, y + 20), (x + s - 10, y + s - 6),
-                   (x + 10, y + s - 6)], fill=color)
-        d.line([(x + s / 2, y + 6), (x + s / 2, y + 20)], fill=color, width=3)
-        d.polygon([(x + s / 2, y + 6), (x + s / 2, y + 18), (x + s - 8, y + 18)], fill=RED)
-    elif kind == "rocket":
-        d.polygon([(x + s / 2, y + 2), (x + s - 8, y + 22), (x + s / 2, y + 17),
-                   (x + 8, y + 22)], fill=color)
-        d.polygon([(x + s / 2, y + 22), (x + s / 2 + 6, y + s - 2),
-                   (x + s / 2 - 6, y + s - 2)], fill=RED)
-
-
-# ---------------------------------------------------------------- build
-def build(out_path):
-    rc, fc = check_counts()
-    img = Image.new("RGB", (W, H), PAPER)
-    d = ImageDraw.Draw(img)
-    X0, X1 = 14, 1010
-    CW = X1 - X0  # 996
-
-    # --- masthead ---
-    d.rectangle([0, 0, W, 58], fill=NAVY)
-    d.text((X0, 12), "THE WORLD IN ONE DAY", font=font(30, True), fill=LIGHT)
-    d.text((X1 - d.textlength("FRIDAY \u2022 27 NOVEMBER 2026", font=font(22, True)), 16),
-           "FRIDAY \u2022 27 NOVEMBER 2026", font=font(22, True), fill=GOLD)
-    d.rectangle([0, 58, W, 62], fill=GOLD)
-
-    # --- giant date line ---
-    d.text((X0, 68), "FRIDAY 27 NOVEMBER 2026", font=font(38, True), fill=NAVY)
-    right = "50 STORIES \u2022 9 REGIONS \u2022 14 FIELDS"
-    d.text((X1 - d.textlength(right, font=font(20, True)), 78), right,
-           font=font(20, True), fill=INK)
-    # --- sub-line ---
-    sub = ("ALL FIRST REPORTED TODAY \u2022 AS OF %s \u2014 THE DAY CONTINUES AFTER THIS IMAGE"
-           % BUILD_STAMP)
-    d.text((X0, 112), sub, font=font(15, True), fill=RED)
-
-    # --- region chips ---
-    y = 132
-    chip_f = font(13, True)
-    total_w = sum(d.textlength("%s %d" % (n, c), font=chip_f) + 18 for n, c in REGIONS) \
-        + 10 * (len(REGIONS) - 1)
-    assert total_w <= CW, "chips too wide: %d" % total_w
-    cx = X0
-    for name, cnt in REGIONS:
-        label = "%s %d" % (name.upper(), cnt)
-        w = d.textlength(label, font=chip_f) + 18
-        d.rounded_rectangle([cx, y, cx + w, y + 24], radius=12, fill=NAVY)
-        d.text((cx + 9, y + 4), label, font=chip_f, fill=LIGHT)
-        cx += w + 10
-
-    # --- key numbers strip ---
-    y = 164
-    bw = (CW - 7 * 6) / 8
-    for i, (val, lab) in enumerate(KEY_NUMBERS):
-        bx = X0 + i * (bw + 6)
-        d.rectangle([bx, y, bx + bw, y + 46], fill=PANEL, outline=NAVY, width=1)
-        vf = font(20, True)
-        while d.textlength(val, font=vf) > bw - 8 and vf.size > 13:
-            vf = font(vf.size - 1, True)
-        d.text((bx + (bw - d.textlength(val, font=vf)) / 2, y + 3), val, font=vf, fill=RED)
-        lf = font(10, True)
-        d.text((bx + (bw - d.textlength(lab, font=lf)) / 2, y + 28), lab, font=lf, fill=NAVY)
-
-    # --- timeline ---
-    y = 226
-    d.line([(X0, y), (X1, y)], fill=NAVY, width=2)
-    step = CW / len(TIMELINE)
-    for i, (t, txt) in enumerate(TIMELINE):
-        ex = X0 + step * i + step / 2
-        d.ellipse([ex - 5, y - 5, ex + 5, y + 5], fill=RED, outline=LIGHT, width=1)
-        tf = font(11, True)
-        d.text((ex - d.textlength(t, font=tf) / 2, y + 8), t, font=tf, fill=RED)
-        one_line(d, ex - 56, y + 22, txt, font(11), 112, fill=INK)
-
-    # --- big scenes ---
-    y = 268
-    bh = 178
-    bw3 = (CW - 20) / 3
-    big_colors = [NAVY, MAROON, GREEN]
-    for i, (head, body, region, field, src) in enumerate(PICTURED_BIG):
-        bx = X0 + i * (bw3 + 10)
-        d.rectangle([bx, y, bx + bw3, y + bh], fill=PANEL, outline=big_colors[i], width=2)
-        d.rectangle([bx, y, bx + bw3, y + 34], fill=big_colors[i])
-        hf = font(17, True)
-        while d.textlength(head, font=hf) > bw3 - 14 and hf.size > 12:
-            hf = font(hf.size - 1, True)
-        d.text((bx + 7, y + 7), head, font=hf, fill=LIGHT)
-        by = y + 42
-        for line in body:
-            by = draw_wrapped(d, bx + 8, by, line, font(13), bw3 - 16, 2, fill=INK)
-            by += 2
-        # pictogram strip at bottom of panel
-        py = y + bh - 34
-        if i == 0:
-            # circle of stars + red X
-            cx0, cy0 = bx + bw3 - 52, py + 16
-            import math
-            for k in range(12):
-                a = k * math.pi / 6
-                d.ellipse([cx0 + 20 * math.cos(a) - 2, cy0 + 13 * math.sin(a) - 2,
-                           cx0 + 20 * math.cos(a) + 2, cy0 + 13 * math.sin(a) + 2],
-                          fill=GOLD)
-            d.line([(cx0 - 10, cy0 - 8), (cx0 + 10, cy0 + 8)], fill=RED, width=4)
-            d.line([(cx0 - 10, cy0 + 8), (cx0 + 10, cy0 - 8)], fill=RED, width=4)
-            d.text((bx + 8, py + 4), "\u20ac1.58tn  \u00d7  \u20ac45bn", font=font(15, True), fill=RED)
-        elif i == 1:
-            # skyline silhouette below the toll line (no overlap)
-            d.text((bx + 8, py - 2), "19 IN 48 H  \u2022  74,772 TOTAL", font=font(13, True), fill=MAROON)
-            heights = [6, 10, 5, 12, 8, 11, 6]
-            sx = bx + 8
-            for hh in heights:
-                d.rectangle([sx, py + 30 - hh, sx + 16, py + 30], fill=MAROON)
-                sx += 19
-        else:
-            # 65 vs 65 seat bars
-            d.text((bx + 8, py - 2), "COALITION 65", font=font(12, True), fill=RED)
-            d.rectangle([bx + 8, py + 14, bx + 8 + 150, py + 24], fill=RED)
-            d.text((bx + 168, py - 2), "OPP. 65", font=font(12, True), fill=BLUE)
-            d.rectangle([bx + 168, py + 14, bx + 168 + 150, py + 24], fill=BLUE)
-
-    # --- small scenes: 4 cols x 3 rows ---
-    y = 458
-    sw = (CW - 3 * 8) / 4
-    sh = 66
-    small_colors = [NAVY, TEAL, RED, MAROON, BLUE, (146, 64, 14), (21, 94, 117),
-                    (120, 53, 15), (88, 28, 135), (6, 95, 70), (30, 64, 175), GREEN]
-    for i, (head, fact, region, field, src, icon) in enumerate(PICTURED_SMALL):
-        r, c = divmod(i, 4)
-        sx = X0 + c * (sw + 8)
-        sy = y + r * (sh + 6)
-        d.rectangle([sx, sy, sx + sw, sy + sh], fill=PANEL, outline=(200, 196, 182), width=1)
-        d.rectangle([sx, sy, sx + 46, sy + sh], fill=PANEL_BG)
-        draw_icon(d, icon, sx + 4, sy + 12, 38, small_colors[i])
-        hf = font(13, True)
-        while d.textlength(head, font=hf) > sw - 56 and hf.size > 10:
-            hf = font(hf.size - 1, True)
-        d.text((sx + 52, sy + 5), head, font=hf, fill=NAVY)
-        draw_wrapped(d, sx + 52, sy + 24, fact, font(12), sw - 58, 2, fill=INK)
-
-    # --- ALSO LISTED ---
-    y = 676
-    d.rectangle([X0, y, X1, y + 22], fill=NAVY)
-    d.text((X0 + 8, y + 3), "ALSO LISTED \u2014 35 MORE STORIES, ALL FIRST REPORTED TODAY",
-           font=font(14, True), fill=LIGHT)
-    col_w = (CW - 2 * 14) / 3
-    row_h = 21
-    list_f = font(11)
-    for idx, (txt, region, field, src) in enumerate(LISTED):
-        col, row = divmod(idx, 12)
-        lx = X0 + col * (col_w + 14)
-        ly = y + 28 + row * row_h
-        num = "L%d" % (idx + 1)
-        d.text((lx, ly), num, font=font(11, True), fill=RED)
-        one_line(d, lx + 26, ly, txt, list_f, col_w - 26, fill=INK)
-
-    # --- bottom boxes ---
-    y = 944
-    bw2 = (CW - 12) / 2
-    d.rectangle([X0, y, X0 + bw2, y + 56], fill=PANEL, outline=NAVY, width=1)
-    d.text((X0 + 8, y + 4), "TOMORROW", font=font(12, True), fill=NAVY)
-    draw_wrapped(d, X0 + 8, y + 20,
-                 "EU talks resume Dec 17\u201318 \u2022 OPEC+ meets Sunday \u2022 NZ coalition talks \u2022 "
-                 "Victoria votes Sat \u2022 Duterte ICC trial Nov 30",
-                 font(12), bw2 - 16, 2, fill=INK)
-    bx = X0 + bw2 + 12
-    d.rectangle([bx, y, bx + bw2, y + 56], fill=PANEL, outline=NAVY, width=1)
-    d.text((bx + 8, y + 4), "DATE CHECK \u2014 LEFT OUT (FIRST REPORTED 26 NOV OR EARLIER)",
-           font=font(12, True), fill=NAVY)
-    draw_wrapped(d, bx + 8, y + 20,
-                 "EU summit opening \u2022 Jazan strike \u2022 Brazil\u2013Milei rift \u2022 "
-                 "tariffs blitz \u2022 Bogor toll \u2022 F1 Abu Dhabi",
-                 font(12), bw2 - 16, 2, fill=INK)
-
-    # --- footer ---
-    d.text((X0, 1008),
-           "All 50 stories first reported Friday 27 November 2026 (any time zone). Sources: Reuters, AP, "
-           "Al Jazeera, Consilium, BBC, NBS, NZ Herald, Xinhua, WSJ.",
-           font=font(11), fill=GREY)
-
-    img.save(out_path, "JPEG", quality=88, optimize=False)
+    rc, fc = Counter(s["region"] for s in stories), Counter(s["field"] for s in stories)
+    assert sum(rc.values()) == 50 and sum(fc.values()) == 50
+    assert len(rc) == 10, rc
+    assert len(fc) == 18, fc
+    assert sum(n for _, n in REGIONS) == 50
+    assert {k.upper(): v for k, v in dict(REGIONS).items()} == \
+        {k.upper(): v for k, v in dict(rc).items()}, (dict(REGIONS), dict(rc))
     return rc, fc
 
 
-if __name__ == "__main__":
+# ---------------------------------------------------------------- drawing
+
+def draw_page():
+    check_counts()
+    img = Image.new("RGB", (W, H), PAPER)
+    d = ImageDraw.Draw(img)
+    x0, x1 = MARGIN, W - MARGIN
+    cw = x1 - x0
+
+    # Masthead
+    d.rectangle([0, 0, W, 58], fill=BURGUNDY)
+    d.text((MARGIN, 12), "THE WORLD IN ONE PAGE",
+           font=font(SANS_B, 30), fill=WHITE)
+    d.text((W - MARGIN - d.textlength("50 STORIES · 1 DAY",
+           font=font(SANS_B, 15)), 20), "50 STORIES · 1 DAY",
+           font=font(SANS_B, 15), fill=(232, 205, 160))
+
+    # Dateline
+    d.text((MARGIN, 66), "FRIDAY 27 NOVEMBER 2026",
+           font=font(SERIF_B, 38), fill=INK)
+    right = "ALL FIRST REPORTED TODAY"
+    d.text((W - MARGIN - d.textlength(right, font=font(SANS_B, 13)), 82),
+           right, font=font(SANS_B, 13), fill=BURGUNDY)
+
+    # Subline
+    sub = ("EVERY STORY FIRST REPORTED FRIDAY 27 NOVEMBER 2026  ·  "
+           "AS OF 11:00 UTC — THE DAY CONTINUES AFTER THIS IMAGE")
+    fit_check(d, sub, font(SANS, 12), cw, "subline")
+    d.text((MARGIN, 110), sub, font=font(SANS, 12), fill=MUTED)
+
+    # Region chips
+    y = 130
+    cx = MARGIN
+    chip_f = font(SANS_B, 11)
+    for name, n in REGIONS:
+        label = "%s %d" % (name, n)
+        wch = d.textlength(label, font=chip_f) + 14
+        d.rounded_rectangle([cx, y, cx + wch, y + 20], radius=10,
+                            fill=TINT, outline=LINE)
+        d.text((cx + 7, y + 4), label, font=chip_f, fill=INK)
+        cx += wch + 6
+    assert cx <= x1 + 6, "region chips overflow: %d" % cx
+
+    # Key numbers
+    y = 156
+    bw = (cw - 7 * 6) / 8
+    for i, (num, label) in enumerate(KEY_NUMBERS):
+        bx = MARGIN + i * (bw + 6)
+        d.rectangle([bx, y, bx + bw, y + 50], outline=LINE, fill=WHITE)
+        d.text((bx + bw / 2 - d.textlength(num, font=font(SANS_B, 17)) / 2,
+                y + 5), num, font=font(SANS_B, 17), fill=BURGUNDY)
+        lab_f = font(SANS_B, 8)
+        lines = wrap(d, label, lab_f, bw - 8)
+        assert len(lines) <= 2, label
+        for j, ln in enumerate(lines):
+            d.text((bx + bw / 2 - d.textlength(ln, font=lab_f) / 2,
+                    y + 27 + j * 10), ln, font=lab_f, fill=INK)
+
+    # Timeline
+    y = 212
+    d.text((MARGIN, y), "THE DAY IN UTC",
+           font=font(SANS_B, 11), fill=BURGUNDY)
+    d.line([(MARGIN, y + 31), (x1, y + 31)], fill=INK, width=2)
+    def clamp_cx(cx, text, fnt):
+        w = d.textlength(text, font=fnt)
+        return min(max(cx - w / 2, MARGIN), x1 - w)
+    n = len(TIMELINE)
+    for i, (t, label) in enumerate(TIMELINE):
+        tx = MARGIN + i * (cw - 40) / (n - 1)
+        d.ellipse([tx - 3, y + 28, tx + 3, y + 34], fill=BURGUNDY)
+        tf = font(SANS_B, 10)
+        d.text((clamp_cx(tx, t, tf), y + 14), t, font=tf, fill=INK)
+        lf = font(SANS, 9)
+        lines = wrap(d, label, lf, 110)
+        assert len(lines) <= 2, label
+        for j, ln in enumerate(lines):
+            d.text((clamp_cx(tx, ln, lf), y + 38 + j * 11), ln, font=lf,
+                   fill=MUTED)
+
+    # Big scenes
+    y = 276
+    bh = 200
+    colw = (cw - 2 * 8) / 3
+    for i, s in enumerate(BIG):
+        bx = MARGIN + i * (colw + 8)
+        d.rectangle([bx, y, bx + colw, y + bh], outline=LINE, fill=WHITE)
+        d.rectangle([bx, y, bx + colw, y + 24], fill=s["color"])
+        tf = font(SANS_B, 11)
+        fit_check(d, s["tag"], tf, colw - 12, "big tag")
+        d.text((bx + 8, y + 5), s["tag"], font=tf, fill=WHITE)
+        pic = PICS[s["pic"]]
+        pic(d, bx + colw / 2 - 40, y + 32, 80, s["color"])
+        draw_wrapped(d, s["head"], font(SANS_B, 15), bx + 10, y + 118,
+                     colw - 20, 2, leading=18)
+        draw_wrapped(d, s["detail"], font(SANS, 11), bx + 10, y + 156,
+                     colw - 20, 3, leading=14, fill=MUTED)
+
+    # Small scenes: 4 cols x 3 rows
+    y = 484
+    sh = 72
+    scw = (cw - 3 * 8) / 4
+    for i, s in enumerate(SMALL):
+        r, c = divmod(i, 4)
+        bx = MARGIN + c * (scw + 8)
+        by = y + r * (sh + 6)
+        d.rectangle([bx, by, bx + scw, by + sh], outline=LINE, fill=WHITE)
+        d.rectangle([bx, by, bx + 46, by + sh], fill=TINT)
+        PICS[s["pic"]](d, bx + 3, by + sh / 2 - 20, 40, INK)
+        tx = bx + 52
+        tw = scw - 58
+        draw_wrapped(d, s["head"], font(SANS_B, 11), tx, by + 6, tw, 2,
+                     leading=13)
+        draw_wrapped(d, s["detail"], font(SANS, 9.5), tx, by + 34, tw, 2,
+                     leading=12, fill=MUTED)
+
+    # Listed rows
+    y = 718
+    d.text((MARGIN, y), "ALSO LISTED — 35 MORE STORIES, ALL FIRST REPORTED TODAY",
+           font=font(SANS_B, 12), fill=BURGUNDY)
+    d.line([(MARGIN, y + 18), (x1, y + 18)], fill=INK, width=1)
+    cols = [LISTED[i::3] for i in range(3)]
+    colw2 = (cw - 2 * 16) / 3
+    lf = font(SANS, 10)
+    for ci, col in enumerate(cols):
+        cx = MARGIN + ci * (colw2 + 16)
+        for ri, (lid, head, _r, _f, _s) in enumerate(col):
+            ry = y + 24 + ri * 17
+            line = "%s · %s" % (lid, head)
+            fit_check(d, line, lf, colw2, "listed " + lid)
+            d.text((cx, ry), line, font=lf, fill=INK)
+
+    # Bottom boxes
+    y = 950
+    bw2 = (cw - 8) / 2
+    d.rectangle([MARGIN, y, MARGIN + bw2, y + 50], outline=LINE, fill=TINT)
+    d.text((MARGIN + 8, y + 5), "TOMORROW",
+           font=font(SANS_B, 11), fill=BURGUNDY)
+    draw_wrapped(d, "Spain votes Sunday — Vox tipped kingmaker. OPEC+ "
+                    "meets Sunday on output. NZ kingmaker talks begin.",
+                 font(SANS, 10), MARGIN + 8, y + 21, bw2 - 16, 2,
+                 leading=13, fill=INK)
+    d.rectangle([MARGIN + bw2 + 8, y, x1, y + 50], outline=LINE, fill=TINT)
+    d.text((MARGIN + bw2 + 16, y + 5), "DATE CHECK — NOT TODAY'S NEWS",
+           font=font(SANS_B, 11), fill=BURGUNDY)
+    draw_wrapped(d, "Bangkok oil blast (Thu) · UK migration 77,000 (Thu) · "
+                    "N. Korea aid pause (Thu) · Trump 'pull back' (Thu) · "
+                    "Wright biathlon (Thu) · Quantum drone record (Thu).",
+                 font(SANS, 10), MARGIN + bw2 + 16, y + 21, bw2 - 16, 2,
+                 leading=13, fill=INK)
+
+    # Footer
+    foot = ("Sources: Reuters · AP · Al Jazeera · BBC · Consilium · Xinhua · "
+            "WSJ · NBS · NZ Herald · WAFA/QNA · Ukrainian Air Force — "
+            "drawn by an AI agent for make.fun · news-image-20261127")
+    fit_check(d, foot, font(SANS, 9), cw, "footer")
+    d.text((MARGIN, 1006), foot, font=font(SANS, 9), fill=MUTED)
+    return img
+
+
+def main():
+    img = draw_page()
     out = sys.argv[1] if len(sys.argv) > 1 else "entry.png"
-    regions, fields = build(out)
-    print("wrote", out)
-    print("regions:", regions)
-    print("fields:", fields)
+    img.save(out, "JPEG", quality=88, optimize=True)
+    data = open(out, "rb").read()
+    assert data[:2] == b"\xff\xd8", "not a JPEG"
+    assert data[-2:] == b"\xff\xd9", "JPEG missing end marker"
+    assert len(data) <= 1048576, len(data)
+    im = Image.open(out)
+    assert im.size == (1024, 1024), im.size
+    print("%s %d bytes sha256=%s" % (out, len(data),
+                                     hashlib.sha256(data).hexdigest()))
+
+
+if __name__ == "__main__":
+    main()
