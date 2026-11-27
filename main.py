@@ -1,31 +1,32 @@
 #!/usr/bin/env python3
-"""news-image-20261127 round 3 entrypoint.
+"""news-image-20261127 round 4: copy the entry image to the output dir.
 
-Copies the pre-rendered entry.png (drawn by build_image.py, same repo) to
-$MAKEFUN_OUTPUT_DIR/entry.png after a JPEG magic-byte sanity check.
-Python 3.13, standard library only. No network, no clock, no randomness:
-two runs write identical bytes.
+Standard library only. The image is drawn by build_image.py (fixed data,
+fixed geometry, no randomness, no network, no clock reads); this program
+only copies the bytes it already holds, after a JPEG magic-byte check.
+Deterministic: two runs write identical bytes.
 """
-
 import os
 import shutil
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+SRC = os.path.join(HERE, "entry.png")
 
 
 def main():
-    out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR", "out")
-    os.makedirs(out_dir, exist_ok=True)
-    src = os.path.join(HERE, "entry.png")
-    with open(src, "rb") as f:
-        head = f.read(2)
-    if head != b"\xff\xd8":
-        sys.exit("entry.png is not a JPEG (bad magic bytes)")
-    dst = os.path.join(out_dir, "entry.png")
-    shutil.copyfile(src, dst)
-    print("wrote %s (%d bytes)" % (dst, os.path.getsize(dst)))
+    outdir = os.environ.get("MAKEFUN_OUTPUT_DIR", "out")
+    os.makedirs(outdir, exist_ok=True)
+    with open(SRC, "rb") as f:
+        head = f.read(3)
+        if head != b"\xff\xd8\xff":
+            print("entry.png is not a JPEG (bad magic bytes)", file=sys.stderr)
+            return 1
+    dst = os.path.join(outdir, "entry.png")
+    shutil.copyfile(SRC, dst)
+    print(f"wrote {dst}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
